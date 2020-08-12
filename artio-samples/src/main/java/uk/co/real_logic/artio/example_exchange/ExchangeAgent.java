@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -21,7 +21,6 @@ import uk.co.real_logic.artio.library.FixLibrary;
 import uk.co.real_logic.artio.library.LibraryConfiguration;
 import uk.co.real_logic.artio.library.SessionHandler;
 import uk.co.real_logic.artio.session.Session;
-import uk.co.real_logic.artio.validation.AuthenticationStrategy;
 import uk.co.real_logic.artio.validation.MessageValidationStrategy;
 
 import java.util.Collections;
@@ -43,16 +42,13 @@ public class ExchangeAgent implements Agent
         final MessageValidationStrategy validationStrategy = MessageValidationStrategy.targetCompId(ACCEPTOR_COMP_ID)
             .and(MessageValidationStrategy.senderCompId(Collections.singletonList(INITIATOR_COMP_ID)));
 
-        final AuthenticationStrategy authenticationStrategy = AuthenticationStrategy.of(validationStrategy);
-
         final LibraryConfiguration configuration = new LibraryConfiguration();
-        configuration.authenticationStrategy(authenticationStrategy);
 
         // You register the new session handler - which is your application hook
         // that receives messages for new sessions
         configuration
             .libraryConnectHandler(new LoggingLibraryConnectHandler())
-            .sessionAcquireHandler(this::onAcquire)
+            .sessionAcquireHandler((session, acquiredInfo) -> onAcquire(session))
             .sessionExistsHandler(new AcquiringSessionExistsHandler(true))
             .libraryAeronChannels(singletonList(IPC_CHANNEL));
 
@@ -61,7 +57,7 @@ public class ExchangeAgent implements Agent
         System.out.println("Connecting library");
     }
 
-    private SessionHandler onAcquire(final Session session, final boolean isSlow)
+    private SessionHandler onAcquire(final Session session)
     {
         System.out.println(session.compositeKey() + " logged in");
         return new ExchangeSessionHandler(session);

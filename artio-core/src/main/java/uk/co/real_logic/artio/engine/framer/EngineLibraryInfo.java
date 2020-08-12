@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,16 +15,15 @@
  */
 package uk.co.real_logic.artio.engine.framer;
 
-import uk.co.real_logic.artio.engine.SessionInfo;
+import uk.co.real_logic.artio.engine.ConnectedSessionInfo;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 import static uk.co.real_logic.artio.engine.FixEngine.ENGINE_LIBRARY_ID;
 
 class EngineLibraryInfo implements LibraryInfo
 {
-    private final ArrayList<SessionInfo> sessions;
+    private final ArrayList<ConnectedSessionInfo> sessions;
     private final GatewaySessions gatewaySessions;
 
     EngineLibraryInfo(final GatewaySessions gatewaySessions)
@@ -43,7 +42,7 @@ class EngineLibraryInfo implements LibraryInfo
         return "Gateway Library";
     }
 
-    public List<SessionInfo> sessions()
+    public List<ConnectedSessionInfo> sessions()
     {
         return sessions;
     }
@@ -68,7 +67,7 @@ class EngineLibraryInfo implements LibraryInfo
 
         final EngineLibraryInfo that = (EngineLibraryInfo)o;
 
-        return gatewaySessions != null ? gatewaySessions.equals(that.gatewaySessions) : that.gatewaySessions == null;
+        return Objects.equals(gatewaySessions, that.gatewaySessions);
     }
 
     public int hashCode()

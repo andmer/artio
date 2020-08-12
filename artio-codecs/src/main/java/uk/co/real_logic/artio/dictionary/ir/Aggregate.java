@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -49,17 +49,47 @@ public abstract class Aggregate
         return entries.stream().filter((entry) -> predicate.test(entry.element()));
     }
 
+    public Stream<Entry> fieldEntries()
+    {
+        return entries().stream().filter(Entry::isField);
+    }
+
     /**
      * @return all entries including those of nested components
      */
-    public Stream<Entry> allChildEntries()
+    public Stream<Entry> allFieldsIncludingComponents()
     {
         return entries.stream()
             .flatMap(
                 (entry) -> entry.match(
                     (ele, field) -> Stream.of(ele),
                     (ele, group) -> Stream.empty(),
-                    (ele, component) -> component.allChildEntries()
+                    (ele, component) -> component.allFieldsIncludingComponents()
+                ));
+    }
+
+    /**
+     * @return all entries including those of nested components
+     */
+    public Stream<Entry> allGroupsIncludingComponents()
+    {
+        return entries.stream()
+            .flatMap(
+                (entry) -> entry.match(
+                    (ele, field) -> Stream.empty(),
+                    (ele, group) -> Stream.of(ele),
+                    (ele, component) -> component.allGroupsIncludingComponents()
+                ));
+    }
+
+    public Stream<Entry> allComponents()
+    {
+        return entries.stream()
+            .flatMap(
+                (entry) -> entry.match(
+                    (e, field) -> Stream.empty(),
+                    (e, group) -> Stream.empty(),
+                    (e, component) -> Stream.concat(Stream.of(e), component.allComponents())
                 ));
     }
 

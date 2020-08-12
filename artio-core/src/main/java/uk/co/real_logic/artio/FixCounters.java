@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,37 +17,86 @@ package uk.co.real_logic.artio;
 
 import io.aeron.Aeron;
 import io.aeron.Counter;
+import org.agrona.collections.IntHashSet;
 import org.agrona.concurrent.status.AtomicCounter;
+import org.agrona.concurrent.status.CountersReader;
 import uk.co.real_logic.artio.dictionary.generation.Exceptions;
 
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class FixCounters implements AutoCloseable
 {
-
     private static final int MINIMUM_ARTIO_TYPE_ID = 10_000;
-    private static final int FAILED_INBOUND_TYPE_ID = MINIMUM_ARTIO_TYPE_ID;
-    private static final int FAILED_OUTBOUND_TYPE_ID = 10_001;
-    private static final int FAILED_REPLAY_TYPE_ID = 10_002;
-    private static final int MESSAGES_READ_TYPE_ID = 10_003;
-    private static final int BYTES_IN_BUFFER_TYPE_ID = 10_004;
-    private static final int INVALID_LIBRARY_ATTEMPTS_TYPE_ID = 10_005;
-    private static final int SENT_MSG_SEQ_NO_TYPE_ID = 10_006;
-    private static final int RECV_MSG_SEQ_NO_TYPE_ID = 10_007;
 
-    private final List<Counter> counters = new ArrayList<>();
+    public enum FixCountersId
+    {
+        FAILED_INBOUND_TYPE_ID(MINIMUM_ARTIO_TYPE_ID),
+        FAILED_OUTBOUND_TYPE_ID(10_001),
+        FAILED_REPLAY_TYPE_ID(10_002),
+        MESSAGES_READ_TYPE_ID(10_003),
+        BYTES_IN_BUFFER_TYPE_ID(10_004),
+        INVALID_LIBRARY_ATTEMPTS_TYPE_ID(10_005),
+        SENT_MSG_SEQ_NO_TYPE_ID(10_006),
+        RECV_MSG_SEQ_NO_TYPE_ID(10_007),
+        CURRENT_REPLAY_COUNT_TYPE_ID(10_008);
+
+        final int id;
+
+        FixCountersId(final int id)
+        {
+            this.id = id;
+        }
+
+        public int id()
+        {
+            return id;
+        }
+    }
+
+    private final List<Counter> counters = new CopyOnWriteArrayList<>();
     private final AtomicCounter failedInboundPublications;
     private final AtomicCounter failedOutboundPublications;
     private final AtomicCounter failedReplayPublications;
+    private final AtomicCounter currentReplayCount;
     private final Aeron aeron;
 
-    FixCounters(final Aeron aeron)
+    public static IntHashSet lookupCounterIds(
+        final FixCountersId counterTypeId, final CountersReader countersReader)
+    {
+        final int requiredTypeId = counterTypeId.id();
+        final IntHashSet counterIds = new IntHashSet();
+        countersReader.forEach((counterId, typeId, keyBuffer, label) ->
+        {
+            if (typeId == requiredTypeId)
+            {
+                counterIds.add(counterId);
+            }
+        });
+        return counterIds;
+    }
+
+    FixCounters(final Aeron aeron, final boolean isEngine)
     {
         this.aeron = aeron;
-        failedInboundPublications = newCounter(FAILED_INBOUND_TYPE_ID, "Failed offer to inbound publication");
-        failedOutboundPublications = newCounter(FAILED_OUTBOUND_TYPE_ID, "Failed offer to outbound publication");
-        failedReplayPublications = newCounter(FAILED_REPLAY_TYPE_ID, "Failed offer to replay publication");
+        aeron.addUnavailableCounterHandler((countersReader, registrationId, counterId) ->
+            counters.removeIf(counter -> counter.id() == counterId));
+        failedInboundPublications = newCounter(FixCountersId.FAILED_INBOUND_TYPE_ID.id(),
+                "Failed offer to inbound publication");
+        failedOutboundPublications = newCounter(FixCountersId.FAILED_OUTBOUND_TYPE_ID.id(),
+                "Failed offer to outbound publication");
+        failedReplayPublications = newCounter(FixCountersId.FAILED_REPLAY_TYPE_ID.id(),
+                "Failed offer to replay publication");
+
+        if (isEngine)
+        {
+            currentReplayCount = newCounter(FixCountersId.CURRENT_REPLAY_COUNT_TYPE_ID.id(),
+                "Current Replay Count");
+        }
+        else
+        {
+            currentReplayCount = null;
+        }
     }
 
     public AtomicCounter failedInboundPublications()
@@ -65,30 +114,37 @@ public class FixCounters implements AutoCloseable
         return failedReplayPublications;
     }
 
+    public AtomicCounter currentReplayCount()
+    {
+        return currentReplayCount;
+    }
+
     public AtomicCounter messagesRead(final long connectionId, final String address)
     {
-        return newCounter(MESSAGES_READ_TYPE_ID, "Messages Read from " + address + " id = " + connectionId);
+        return newCounter(FixCountersId.MESSAGES_READ_TYPE_ID.id(),
+                "Messages Read from " + address + " id = " + connectionId);
     }
 
     public AtomicCounter bytesInBuffer(final long connectionId, final String address)
     {
-        return newCounter(BYTES_IN_BUFFER_TYPE_ID, "Quarantined bytes for " + address + " id = " + connectionId);
+        return newCounter(FixCountersId.BYTES_IN_BUFFER_TYPE_ID.id(),
+                "Quarantined bytes for " + address + " id = " + connectionId);
     }
 
     public AtomicCounter invalidLibraryAttempts(final long connectionId, final String address)
     {
-        return newCounter(INVALID_LIBRARY_ATTEMPTS_TYPE_ID,
-            "Invalid Library Attempts for " + address + " id = " + connectionId);
+        return newCounter(FixCountersId.INVALID_LIBRARY_ATTEMPTS_TYPE_ID.id(),
+                "Invalid Library Attempts for " + address + " id = " + connectionId);
     }
 
     public AtomicCounter sentMsgSeqNo(final long connectionId)
     {
-        return newCounter(SENT_MSG_SEQ_NO_TYPE_ID, "Last Sent MsgSeqNo for " + connectionId);
+        return newCounter(FixCountersId.SENT_MSG_SEQ_NO_TYPE_ID.id(), "Last Sent MsgSeqNo for " + connectionId);
     }
 
     public AtomicCounter receivedMsgSeqNo(final long connectionId)
     {
-        return newCounter(RECV_MSG_SEQ_NO_TYPE_ID, "Last Received MsgSeqNo for " + connectionId);
+        return newCounter(FixCountersId.RECV_MSG_SEQ_NO_TYPE_ID.id(), "Last Received MsgSeqNo for " + connectionId);
     }
 
     private AtomicCounter newCounter(final int typeId, final String label)

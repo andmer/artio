@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,7 +15,6 @@
  */
 package uk.co.real_logic.artio.library;
 
-import uk.co.real_logic.artio.messages.GatewayError;
 import uk.co.real_logic.artio.messages.SessionReplyStatus;
 import uk.co.real_logic.artio.session.InternalSession;
 
@@ -25,8 +24,6 @@ import uk.co.real_logic.artio.session.InternalSession;
 class ReleaseToGatewayReply extends LibraryReply<SessionReplyStatus>
 {
     private final InternalSession session;
-
-    private boolean requiresResend;
 
     ReleaseToGatewayReply(
         final LibraryPoller libraryPoller, final long latestReplyArrivalTime, final InternalSession session)
@@ -39,7 +36,7 @@ class ReleaseToGatewayReply extends LibraryReply<SessionReplyStatus>
         }
     }
 
-    private void sendMessage()
+    protected void sendMessage()
     {
         final long position = libraryPoller.saveReleaseSession(session, correlationId);
 
@@ -54,19 +51,5 @@ class ReleaseToGatewayReply extends LibraryReply<SessionReplyStatus>
         }
 
         super.onComplete(result);
-    }
-
-    void onError(final GatewayError errorType, final String errorMessage)
-    {
-    }
-
-    boolean poll(final long timeInMs)
-    {
-        if (requiresResend)
-        {
-            sendMessage();
-        }
-
-        return super.poll(timeInMs);
     }
 }

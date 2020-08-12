@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -47,7 +47,7 @@ class IndexedPositionReader
         sectorFramer = new SectorFramer(buffer.capacity());
     }
 
-    long indexedPosition(final int aeronSessionId)
+    long indexedPosition(final long recordingId)
     {
         final IndexedPositionDecoder decoder = this.decoder;
         final int actingBlockLength = this.actingBlockLength;
@@ -69,8 +69,7 @@ class IndexedPositionReader
             {
                 return UNKNOWN_POSITION;
             }
-            final int aeronSessionIdOfRecord = decoder.sessionId();
-            if (aeronSessionIdOfRecord == aeronSessionId)
+            if (decoder.recordingId() == recordingId)
             {
                 return position;
             }

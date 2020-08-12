@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,7 +20,9 @@ import io.aeron.archive.ArchiveThreadingMode;
 import io.aeron.archive.ArchivingMediaDriver;
 import io.aeron.driver.MediaDriver.Context;
 import org.agrona.IoUtil;
+import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.SigInt;
+import uk.co.real_logic.artio.CommonConfiguration;
 import uk.co.real_logic.artio.SampleUtil;
 import uk.co.real_logic.artio.engine.EngineConfiguration;
 import uk.co.real_logic.artio.engine.FixEngine;
@@ -47,7 +49,7 @@ public final class SampleServer
 
     private static Session session;
 
-    public static void main(final String[] args) throws Exception
+    public static void main(final String[] args)
     {
         final MessageValidationStrategy validationStrategy = MessageValidationStrategy.targetCompId(ACCEPTOR_COMP_ID)
             .and(MessageValidationStrategy.senderCompId(Collections.singletonList(INITIATOR_COMP_ID)));
@@ -75,14 +77,15 @@ public final class SampleServer
             FixEngine gateway = FixEngine.launch(configuration))
         {
             final LibraryConfiguration libraryConfiguration = new LibraryConfiguration();
-            libraryConfiguration.authenticationStrategy(authenticationStrategy);
 
             // You register the new session handler - which is your application hook
             // that receives messages for new sessions
             libraryConfiguration
-                .sessionAcquireHandler(SampleServer::onConnect)
+                .sessionAcquireHandler((session, acquiredInfo) -> onConnect(session))
                 .sessionExistsHandler(new AcquiringSessionExistsHandler())
                 .libraryAeronChannels(singletonList(aeronChannel));
+
+            final IdleStrategy idleStrategy = CommonConfiguration.backoffIdleStrategy();
 
             try (FixLibrary library = SampleUtil.blockingConnect(libraryConfiguration))
             {
@@ -91,14 +94,12 @@ public final class SampleServer
 
                 while (running.get())
                 {
-                    library.poll(1);
+                    idleStrategy.idle(library.poll(1));
 
                     if (session != null && session.state() == DISCONNECTED)
                     {
                         break;
                     }
-
-                    Thread.sleep(100);
                 }
             }
         }
@@ -111,7 +112,7 @@ public final class SampleServer
         IoUtil.delete(new File(configuration.logFileDir()), true);
     }
 
-    private static SessionHandler onConnect(final Session session, final boolean isSlow)
+    private static SessionHandler onConnect(final Session session)
     {
         SampleServer.session = session;
 

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,9 +29,13 @@ final class CalendricalUtil
     static final int SECONDS_IN_DAY = SECONDS_IN_HOUR * 24;
     static final long MILLIS_IN_SECOND = 1_000L;
     static final long MICROS_IN_MILLIS = 1_000L;
+    static final long NANOS_IN_MICROS = 1_000L;
+    static final long NANOS_IN_MILLIS = NANOS_IN_MICROS * MICROS_IN_MILLIS;
     static final long MICROS_IN_SECOND = MILLIS_IN_SECOND * MICROS_IN_MILLIS;
+    static final long NANOS_IN_SECOND = MICROS_IN_SECOND * NANOS_IN_MICROS;
     static final long MILLIS_IN_DAY = SECONDS_IN_DAY * MILLIS_IN_SECOND;
     static final long MICROS_IN_DAY = SECONDS_IN_DAY * MICROS_IN_SECOND;
+    static final long NANOS_IN_DAY = SECONDS_IN_DAY * NANOS_IN_SECOND;
 
     private CalendricalUtil()
     {
@@ -80,10 +84,10 @@ final class CalendricalUtil
     /**
      * Converts a year/month/day representation of a UTC date to the number of days since the epoch.
      *
-     * @param year
-     * @param month
-     * @param day
-     * @return
+     * @param year the year component of the date value to convert
+     * @param month the month component of the date value to convert
+     * @param day the day component of the date value to convert
+     * @return number of days since the epoch
      */
     static int toEpochDay(final int year, final int month, final int day)
     {

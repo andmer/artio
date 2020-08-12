@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -33,13 +33,13 @@ import uk.co.real_logic.artio.validation.AuthenticationStrategy;
 
 import static java.util.Collections.singletonList;
 import static uk.co.real_logic.artio.SampleUtil.blockingConnect;
-import static uk.co.real_logic.artio.validation.SessionPersistenceStrategy.alwaysIndexed;
+import static uk.co.real_logic.artio.validation.SessionPersistenceStrategy.alwaysPersistent;
 
 public class Server implements Agent
 {
-    private ArchivingMediaDriver mediaDriver;
-    private FixEngine fixEngine;
-    private FixLibrary fixLibrary;
+    private final ArchivingMediaDriver mediaDriver;
+    private final FixEngine fixEngine;
+    private final FixLibrary fixLibrary;
 
     public Server()
     {
@@ -51,7 +51,7 @@ public class Server implements Agent
             .bindTo("localhost", StressConfiguration.PORT)
             .logFileDir("stress-server-logs")
             .libraryAeronChannel(aeronChannel)
-            .sessionPersistenceStrategy(alwaysIndexed());
+            .sessionPersistenceStrategy(alwaysPersistent());
 
         configuration
             .authenticationStrategy(authenticationStrategy)
@@ -74,11 +74,10 @@ public class Server implements Agent
 
         final LibraryConfiguration libraryConfiguration = new LibraryConfiguration();
         libraryConfiguration
-            .authenticationStrategy(authenticationStrategy)
             .agentNamePrefix("server-");
 
         fixLibrary = blockingConnect(libraryConfiguration
-            .sessionAcquireHandler(StressSessionHandler::new)
+            .sessionAcquireHandler((session, acquiredInfo) -> new StressSessionHandler(session))
             .sessionExistsHandler(new AcquiringSessionExistsHandler(true))
             .libraryAeronChannels(singletonList(aeronChannel)));
     }
@@ -88,7 +87,7 @@ public class Server implements Agent
         return new AgentRunner(idleStrategy, errorHandler, null, new Server());
     }
 
-    public int doWork() throws Exception
+    public int doWork()
     {
         return fixLibrary.poll(1);
     }

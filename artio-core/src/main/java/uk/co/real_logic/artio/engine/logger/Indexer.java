@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -20,6 +20,7 @@ import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
 import io.aeron.archive.client.ArchiveException;
 import io.aeron.logbuffer.ControlledFragmentHandler;
+import io.aeron.logbuffer.FragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
@@ -32,6 +33,7 @@ import uk.co.real_logic.artio.DebugLogger;
 import uk.co.real_logic.artio.LogTag;
 import uk.co.real_logic.artio.dictionary.generation.Exceptions;
 import uk.co.real_logic.artio.engine.CompletionPosition;
+import uk.co.real_logic.artio.util.CharFormatter;
 
 import java.util.List;
 
@@ -46,11 +48,17 @@ public class Indexer implements Agent, ControlledFragmentHandler
 {
     private static final int LIMIT = 20;
 
+    private final CharFormatter indexingFormatter = new CharFormatter(
+        "Indexing @ %s from [%s, %s]%n");
+    private final CharFormatter catchupFormatter = new CharFormatter(
+        "Catchup [%s]: recordingId = %s, recordingStopped @ %s, indexStopped @ %s%n");
+
     private final List<Index> indices;
     private final Subscription subscription;
     private final String agentNamePrefix;
     private final CompletionPosition completionPosition;
     private final int archiveReplayStream;
+    private final boolean gracefulShutdown;
 
     public Indexer(
         final List<Index> indices,
@@ -59,13 +67,15 @@ public class Indexer implements Agent, ControlledFragmentHandler
         final CompletionPosition completionPosition,
         final AeronArchive aeronArchive,
         final ErrorHandler errorHandler,
-        final int archiveReplayStream)
+        final int archiveReplayStream,
+        final boolean gracefulShutdown)
     {
         this.indices = indices;
         this.subscription = subscription;
         this.agentNamePrefix = agentNamePrefix;
         this.completionPosition = completionPosition;
         this.archiveReplayStream = archiveReplayStream;
+        this.gracefulShutdown = gracefulShutdown;
         catchIndexUp(aeronArchive, errorHandler);
     }
 
@@ -92,7 +102,7 @@ public class Indexer implements Agent, ControlledFragmentHandler
                     {
                         DebugLogger.log(
                             LogTag.INDEX,
-                            "Catchup [%s]: recordingId = %d, recordingStopped @ %d, indexStopped @ %d",
+                            catchupFormatter,
                             index.getName(),
                             recordingId,
                             recordingStoppedPosition,
@@ -105,18 +115,20 @@ public class Indexer implements Agent, ControlledFragmentHandler
                             // Only do 1 replay at a time
                             while (subscription.imageCount() != 1)
                             {
-                                idle(idleStrategy, aeronInvoker);
+                                idle(idleStrategy, aeronInvoker, 0);
                                 aeronArchive.checkForErrorResponse();
                             }
                             idleStrategy.reset();
 
                             final Image replayImage = subscription.imageAtIndex(0);
 
+                            final FragmentHandler handler = (buffer, offset, srcLength, header) ->
+                                index.onCatchup(buffer, offset, srcLength, header, recordingId);
+
                             while (replayImage.position() < recordingStoppedPosition)
                             {
-                                replayImage.poll(index, LIMIT);
-
-                                idle(idleStrategy, aeronInvoker);
+                                final int workCount = replayImage.poll(handler, LIMIT);
+                                idle(idleStrategy, aeronInvoker, workCount);
                             }
                             idleStrategy.reset();
                         }
@@ -130,14 +142,15 @@ public class Indexer implements Agent, ControlledFragmentHandler
         }
     }
 
-    private void idle(final IdleStrategy idleStrategy, final AgentInvoker aeronInvoker)
+    private void idle(final IdleStrategy idleStrategy, final AgentInvoker aeronInvoker, final int workCount)
     {
+        int totalWork = workCount;
         if (aeronInvoker != null)
         {
-            aeronInvoker.invoke();
+            totalWork += aeronInvoker.invoke();
         }
 
-        idleStrategy.idle();
+        idleStrategy.idle(totalWork);
     }
 
     public Action onFragment(final DirectBuffer buffer, final int offset, final int length, final Header header)
@@ -147,14 +160,15 @@ public class Indexer implements Agent, ControlledFragmentHandler
         final long endPosition = header.position();
         DebugLogger.log(
             LogTag.INDEX,
-            "Indexing @ %d from [%d, %d]%n",
+            indexingFormatter,
             endPosition,
             streamId,
             aeronSessionId);
 
         for (int i = 0, size = indices.size(); i < size; i++)
         {
-            indices.get(i).onFragment(buffer, offset, length, header);
+            final Index index = indices.get(i);
+            index.onFragment(buffer, offset, length, header);
         }
 
         return CONTINUE;
@@ -162,9 +176,12 @@ public class Indexer implements Agent, ControlledFragmentHandler
 
     public void onClose()
     {
-        quiesce();
+        if (gracefulShutdown)
+        {
+            quiesce();
 
-        Exceptions.closeAll(() -> Exceptions.closeAll(indices), subscription);
+            Exceptions.closeAll(() -> Exceptions.closeAll(indices), subscription);
+        }
     }
 
     private void quiesce()

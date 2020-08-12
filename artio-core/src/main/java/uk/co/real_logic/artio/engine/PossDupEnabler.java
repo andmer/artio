@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,23 +15,25 @@
  */
 package uk.co.real_logic.artio.engine;
 
-import io.aeron.logbuffer.ControlledFragmentHandler.Action;
 import io.aeron.logbuffer.BufferClaim;
+import io.aeron.logbuffer.ControlledFragmentHandler.Action;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
 import org.agrona.ExpandableArrayBuffer;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.concurrent.EpochClock;
 import uk.co.real_logic.artio.DebugLogger;
-import uk.co.real_logic.artio.dictionary.IntDictionary;
+import uk.co.real_logic.artio.LogTag;
+import uk.co.real_logic.artio.dictionary.LongDictionary;
 import uk.co.real_logic.artio.fields.UtcTimestampEncoder;
 import uk.co.real_logic.artio.messages.FixMessageDecoder;
 import uk.co.real_logic.artio.messages.MessageHeaderDecoder;
 import uk.co.real_logic.artio.otf.OtfParser;
+import uk.co.real_logic.artio.protocol.GatewayPublication;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
-import java.util.function.IntPredicate;
 
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.ABORT;
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
@@ -39,9 +41,9 @@ import static io.aeron.protocol.DataHeaderFlyweight.BEGIN_FLAG;
 import static io.aeron.protocol.DataHeaderFlyweight.END_FLAG;
 import static java.nio.ByteOrder.LITTLE_ENDIAN;
 import static java.nio.charset.StandardCharsets.US_ASCII;
-import static uk.co.real_logic.artio.LogTag.CATCHUP;
 import static uk.co.real_logic.artio.engine.PossDupFinder.NO_ENTRY;
 import static uk.co.real_logic.artio.engine.framer.CatchupReplayer.FRAME_LENGTH;
+import static uk.co.real_logic.artio.messages.FixMessageDecoder.metaDataHeaderLength;
 import static uk.co.real_logic.artio.util.AsciiBuffer.SEPARATOR_LENGTH;
 import static uk.co.real_logic.artio.util.MutableAsciiBuffer.SEPARATOR;
 
@@ -56,29 +58,38 @@ public class PossDupEnabler
 
     private final ExpandableArrayBuffer fragmentedMessageBuffer = new ExpandableArrayBuffer();
     private final PossDupFinder possDupFinder = new PossDupFinder();
-    private final OtfParser parser = new OtfParser(possDupFinder, new IntDictionary());
+    private final OtfParser parser = new OtfParser(possDupFinder, new LongDictionary());
     private final MutableAsciiBuffer mutableAsciiFlyweight = new MutableAsciiBuffer();
-    private final UtcTimestampEncoder utcTimestampEncoder = new UtcTimestampEncoder();
+    private final UtcTimestampEncoder utcTimestampEncoder;
 
     private final BufferClaim bufferClaim;
-    private final IntPredicate claimer;
+    private final Claimer claimer;
     private final PreCommit onPreCommit;
     private final Consumer<String> onIllegalStateFunc;
     private final ErrorHandler errorHandler;
     private final EpochClock clock;
     private final int maxPayloadLength;
+    private final LogTag logTag;
 
     private int fragmentedMessageLength;
 
+    public interface Claimer
+    {
+        boolean claim(int totalLength, int messageLength);
+    }
+
     public PossDupEnabler(
+        final UtcTimestampEncoder utcTimestampEncoder,
         final BufferClaim bufferClaim,
-        final IntPredicate claimer,
+        final Claimer claimer,
         final PreCommit onPreCommit,
         final Consumer<String> onIllegalStateFunc,
         final ErrorHandler errorHandler,
         final EpochClock clock,
-        final int maxPayloadLength)
+        final int maxPayloadLength,
+        final LogTag logTag)
     {
+        this.utcTimestampEncoder = utcTimestampEncoder;
         this.bufferClaim = bufferClaim;
         this.claimer = claimer;
         this.onPreCommit = onPreCommit;
@@ -86,6 +97,7 @@ public class PossDupEnabler
         this.errorHandler = errorHandler;
         this.clock = clock;
         this.maxPayloadLength = maxPayloadLength;
+        this.logTag = logTag;
     }
 
     // Only return abort if genuinely back pressured
@@ -94,7 +106,8 @@ public class PossDupEnabler
         final int messageOffset,
         final int messageLength,
         final int srcOffset,
-        final int srcLength)
+        final int srcLength,
+        final int metaDataAdjustment)
     {
         parser.onMessage(srcBuffer, messageOffset, messageLength);
         final int possDupSrcOffset = possDupFinder.possDupOffset();
@@ -128,7 +141,8 @@ public class PossDupEnabler
                     messageLength,
                     lengthDelta + lengthOfAddedFields,
                     newBodyLength,
-                    newLength))
+                    newLength,
+                    metaDataAdjustment))
                 {
                     return commit(true);
                 }
@@ -193,21 +207,22 @@ public class PossDupEnabler
         }
         else
         {
-            return claimer.test(newLength);
+            final int messageLength = newLength - GatewayPublication.FRAMED_MESSAGE_SIZE;
+            return claimer.claim(newLength, messageLength);
         }
     }
 
     private Action commit(final boolean hasAlteredBodyLength)
     {
-        final int logLengthOffset = hasAlteredBodyLength ? FRAME_LENGTH : 0;
+        final int logLengthOffset = hasAlteredBodyLength ? FRAME_LENGTH + metaDataHeaderLength() : 0;
         if (isProcessingFragmentedMessage())
         {
             int fragmentOffset = FRAGMENTED_MESSAGE_BUFFER_OFFSET;
             onPreCommit.onPreCommit(fragmentedMessageBuffer, fragmentOffset);
 
             DebugLogger.log(
-                CATCHUP,
-                "Resending: %s%n",
+                logTag,
+                "Resending: ",
                 fragmentedMessageBuffer,
                 fragmentOffset + logLengthOffset,
                 fragmentedMessageLength - logLengthOffset);
@@ -215,7 +230,8 @@ public class PossDupEnabler
             while (fragmentedMessageLength > 0)
             {
                 final int fragmentLength = Math.min(maxPayloadLength, fragmentedMessageLength);
-                if (claimer.test(fragmentLength))
+                final int messageLength = fragmentLength - GatewayPublication.FRAMED_MESSAGE_SIZE;
+                if (claimer.claim(fragmentLength, messageLength))
                 {
                     if (fragmentOffset == FRAGMENTED_MESSAGE_BUFFER_OFFSET)
                     {
@@ -252,8 +268,8 @@ public class PossDupEnabler
             final int offset = bufferClaim.offset();
 
             DebugLogger.log(
-                CATCHUP,
-                "Resending: %s%n",
+                logTag,
+                "Resending: ",
                 buffer,
                 offset + logLengthOffset,
                 bufferClaim.length() - logLengthOffset);
@@ -283,9 +299,9 @@ public class PossDupEnabler
         final int messageLength,
         final int totalLengthDelta,
         final int newBodyLength,
-        final int newLength)
+        final int newLength,
+        final int metaDataAdjustment)
     {
-
         final MutableDirectBuffer writeBuffer = writeBuffer();
         final int writeOffset = writeOffset();
 
@@ -324,7 +340,7 @@ public class PossDupEnabler
         // Update the sending time
         updateSendingTime(srcOffset);
 
-        updateFrameBodyLength(messageLength, writeBuffer, writeOffset, totalLengthDelta);
+        updateFrameBodyLength(messageLength, writeBuffer, writeOffset, totalLengthDelta, metaDataAdjustment);
         final int messageClaimOffset = srcToClaim(messageOffset, srcOffset, writeOffset);
         updateBodyLengthAndChecksum(
             srcOffset, messageClaimOffset, writeBuffer, writeOffset, newBodyLength, writeOffset + newLength);
@@ -340,15 +356,19 @@ public class PossDupEnabler
         final int sendingTimeLength = possDupFinder.sendingTimeLength();
 
         final int sendingTimeClaimOffset = srcToClaim(sendingTimeOffset, srcOffset, claimOffset);
-        utcTimestampEncoder.encode(clock.time());
+        utcTimestampEncoder.encodeFrom(clock.time(), TimeUnit.MILLISECONDS);
         claimBuffer.putBytes(sendingTimeClaimOffset, utcTimestampEncoder.buffer(), 0, sendingTimeLength);
     }
 
     private void updateFrameBodyLength(
-        final int messageLength, final MutableDirectBuffer claimBuffer, final int claimOffset, final int lengthDelta)
+        final int messageLength,
+        final MutableDirectBuffer claimBuffer,
+        final int claimOffset,
+        final int lengthDelta,
+        final int metaDataAdjustment)
     {
         final int frameBodyLengthOffset =
-            claimOffset + MessageHeaderDecoder.ENCODED_LENGTH + FixMessageDecoder.BLOCK_LENGTH;
+            claimOffset + MessageHeaderDecoder.ENCODED_LENGTH + FixMessageDecoder.BLOCK_LENGTH + metaDataAdjustment;
         final short frameBodyLength = (short)(messageLength + lengthDelta);
         claimBuffer.putShort(frameBodyLengthOffset, frameBodyLength, LITTLE_ENDIAN);
     }

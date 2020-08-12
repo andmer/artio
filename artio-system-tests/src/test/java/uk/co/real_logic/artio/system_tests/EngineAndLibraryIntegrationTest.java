@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -28,15 +28,16 @@ import uk.co.real_logic.artio.engine.FixEngine;
 import uk.co.real_logic.artio.engine.framer.LibraryInfo;
 import uk.co.real_logic.artio.library.FixLibrary;
 import uk.co.real_logic.artio.library.LibraryConfiguration;
-import uk.co.real_logic.artio.validation.AuthenticationStrategy;
 import uk.co.real_logic.artio.validation.MessageValidationStrategy;
 
 import java.util.Arrays;
 
 import static io.aeron.CommonContext.IPC_CHANNEL;
 import static java.util.Collections.singletonList;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.hasSize;
-import static org.junit.Assert.assertThat;
+import static org.hamcrest.Matchers.isA;
+import static org.junit.Assert.assertFalse;
 import static uk.co.real_logic.artio.TestFixtures.*;
 import static uk.co.real_logic.artio.Timing.assertEventuallyTrue;
 import static uk.co.real_logic.artio.engine.FixEngine.ENGINE_LIBRARY_ID;
@@ -51,6 +52,7 @@ public class EngineAndLibraryIntegrationTest
     private FixLibrary library;
     private FixLibrary library2;
 
+    private final FakeConnectHandler fakeConnectHandler = new FakeConnectHandler();
     private final FakeOtfAcceptor otfAcceptor = new FakeOtfAcceptor();
     private final FakeHandler sessionHandler = new FakeHandler(otfAcceptor);
     private final TestSystem testSystem = new TestSystem();
@@ -64,7 +66,7 @@ public class EngineAndLibraryIntegrationTest
     }
 
     @After
-    public void close() throws Exception
+    public void close()
     {
         try
         {
@@ -78,8 +80,8 @@ public class EngineAndLibraryIntegrationTest
 
     private void launchEngine(final int replyTimeoutInMs)
     {
-        delete(ACCEPTOR_LOGS);
         final EngineConfiguration config = acceptingConfig(unusedPort(), ACCEPTOR_ID, INITIATOR_ID);
+        config.deleteLogFileDirOnStart(true);
         config.replyTimeoutInMs(replyTimeoutInMs);
         engine = FixEngine.launch(config);
     }
@@ -128,7 +130,7 @@ public class EngineAndLibraryIntegrationTest
         setupTwoLibrariesAndCloseTheFirst();
     }
 
-    private FixLibrary setupTwoLibrariesAndCloseTheFirst()
+    private void setupTwoLibrariesAndCloseTheFirst()
     {
         setupTwoLibraries();
 
@@ -139,8 +141,6 @@ public class EngineAndLibraryIntegrationTest
         assertEventuallyHasLibraries(
             FixMatchers.matchesLibrary(library2.libraryId()),
             FixMatchers.matchesLibrary(ENGINE_LIBRARY_ID));
-
-        return library2;
     }
 
     private void setupTwoLibraries()
@@ -181,6 +181,45 @@ public class EngineAndLibraryIntegrationTest
         );
     }
 
+    @Test(timeout = 5_000L)
+    public void libraryShouldReconnectToEngine() throws InterruptedException
+    {
+        final int beyondTimeout = SHORT_TIMEOUT_IN_MS + 1;
+
+        library = connectLibrary();
+        awaitLibraryConnect(library);
+        assertNumActiveLibraries(1);
+
+        Thread.sleep(beyondTimeout);
+        assertEventuallyTrue("engine fails to timeout library", () -> libraries(engine).size() == 1);
+        // Poll until engine heartbeat messages are all read in order to force a library timeout
+        library.poll(50);
+
+        assertEventuallyTrue("Library still connected", () ->
+        {
+            Thread.sleep(beyondTimeout);
+            testSystem.poll();
+            assertFalse("library still connected", library.isConnected());
+        });
+
+        assertEventuallyTrue("library reconnect fails", () ->
+        {
+            testSystem.poll();
+            return libraries(engine).size() == 2 && library.isConnected();
+        });
+    }
+
+    @Test
+    public void shouldNotAllowClosingMidPoll()
+    {
+        fakeConnectHandler.shouldCloseOnConnect(true);
+
+        library = connectLibrary();
+        awaitLibraryConnect(library);
+
+        assertThat(fakeConnectHandler.exception(), isA(IllegalArgumentException.class));
+    }
+
     @SafeVarargs
     private final void assertEventuallyHasLibraries(final Matcher<LibraryInfo>... libraryMatchers)
     {
@@ -198,15 +237,13 @@ public class EngineAndLibraryIntegrationTest
         final MessageValidationStrategy validationStrategy = MessageValidationStrategy.targetCompId(ACCEPTOR_ID)
             .and(MessageValidationStrategy.senderCompId(Arrays.asList(INITIATOR_ID, INITIATOR_ID2)));
 
-        final AuthenticationStrategy authenticationStrategy = AuthenticationStrategy.of(validationStrategy);
-
         final LibraryConfiguration config = new LibraryConfiguration();
         config
             .sessionAcquireHandler(sessionHandler)
+            .libraryConnectHandler(fakeConnectHandler)
             .libraryAeronChannels(singletonList(IPC_CHANNEL))
-            .authenticationStrategy(authenticationStrategy)
             .messageValidationStrategy(validationStrategy)
-            .replyTimeoutInMs(TIMEOUT_IN_MS);
+            .replyTimeoutInMs(SHORT_TIMEOUT_IN_MS);
 
         return testSystem.add(connect(config));
     }

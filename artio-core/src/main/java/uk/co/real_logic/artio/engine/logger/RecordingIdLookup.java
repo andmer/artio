@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -37,27 +37,47 @@ public class RecordingIdLookup
         this.counters = counters;
     }
 
-    long getRecordingId(final int aeronSessionId)
+    public long getRecordingId(final int aeronSessionId)
     {
         long recordingId = aeronSessionIdToRecordingId.get(aeronSessionId);
 
         while (recordingId == NULL_RECORDING_ID)
         {
-            final int counterId = RecordingPos.findCounterIdBySession(counters, aeronSessionId);
-            if (counterId != NULL_COUNTER_ID)
-            {
-                recordingId = RecordingPos.getRecordingId(counters, counterId);
-                if (recordingId != NULL_RECORDING_ID)
-                {
-                    aeronSessionIdToRecordingId.put(aeronSessionId, recordingId);
-                }
-            }
+            recordingId = checkRecordingId(aeronSessionId);
 
             archiverIdleStrategy.idle();
         }
 
         archiverIdleStrategy.reset();
 
+        return recordingId;
+    }
+
+    long findRecordingId(final int aeronSessionId)
+    {
+        long recordingId = aeronSessionIdToRecordingId.get(aeronSessionId);
+
+        if (recordingId == NULL_RECORDING_ID)
+        {
+            recordingId = checkRecordingId(aeronSessionId);
+        }
+
+        return recordingId;
+    }
+
+    private long checkRecordingId(final int aeronSessionId)
+    {
+        final int counterId = RecordingPos.findCounterIdBySession(counters, aeronSessionId);
+        if (counterId == NULL_COUNTER_ID)
+        {
+            return NULL_RECORDING_ID;
+        }
+
+        final long recordingId = RecordingPos.getRecordingId(counters, counterId);
+        if (recordingId != NULL_RECORDING_ID)
+        {
+            aeronSessionIdToRecordingId.put(aeronSessionId, recordingId);
+        }
         return recordingId;
     }
 

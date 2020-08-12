@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -55,24 +55,20 @@ public final class Streams
         this.recordingCoordinator = recordingCoordinator;
     }
 
-    public GatewayPublication gatewayPublication(final IdleStrategy idleStrategy, final String name)
+    public GatewayPublication gatewayPublication(
+        final IdleStrategy idleStrategy, final ExclusivePublication dataPublication)
     {
         return new GatewayPublication(
-            dataPublication(name),
+            dataPublication,
             failedPublications,
             idleStrategy,
             clock,
-            maxClaimAttempts
-        );
+            maxClaimAttempts);
     }
 
-    private ExclusivePublication dataPublication(final String name)
+    public ExclusivePublication dataPublication(final String name)
     {
-        final ExclusivePublication publication = aeron.addExclusivePublication(aeronChannel, streamId);
-        if (recordingCoordinator != null)
-        {
-            recordingCoordinator.track(publication);
-        }
+        final ExclusivePublication publication = recordingCoordinator.track(aeronChannel, streamId);
         StreamInformation.print(name, publication, printAeronStreamIdentifiers);
         return publication;
     }

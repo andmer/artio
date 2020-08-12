@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,9 +36,6 @@ public final class CustomMatchers
     {
     }
 
-    /**
-     * Assert that a range of an ascii flyweight equals a String.
-     */
     public static Matcher<AsciiBuffer> sequenceEqualsAscii(final String expectedValue, final int offset)
     {
         return sequenceEqualsAscii(expectedValue, offset, expectedValue.length());
@@ -70,9 +67,6 @@ public final class CustomMatchers
         };
     }
 
-    /**
-     * Doesn't use getters for properties, like hamcrest.
-     */
     public static <T> Matcher<T> hasFluentProperty(final String name, final Matcher<?> valueMatcher)
     {
         return new TypeSafeMatcher<T>()

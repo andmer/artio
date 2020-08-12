@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,22 +15,21 @@
  */
 package uk.co.real_logic.artio.otf;
 
-import org.junit.Rule;
 import org.junit.experimental.theories.DataPoint;
 import org.junit.experimental.theories.Theories;
 import org.junit.experimental.theories.Theory;
-import org.junit.rules.ExpectedException;
 import org.junit.runner.RunWith;
 import org.mockito.InOrder;
-import uk.co.real_logic.artio.dictionary.IntDictionary;
+import uk.co.real_logic.artio.dictionary.LongDictionary;
 import uk.co.real_logic.artio.fields.AsciiFieldFlyweight;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.fail;
 import static org.mockito.Mockito.*;
 import static uk.co.real_logic.artio.ValidationError.INVALID_CHECKSUM;
 import static uk.co.real_logic.artio.ValidationError.PARSE_ERROR;
 import static uk.co.real_logic.artio.util.TestMessages.*;
-
 
 @RunWith(Theories.class)
 public class OtfParserTest
@@ -43,15 +42,12 @@ public class OtfParserTest
 
     public static final int LENGTH = 16 * 1024;
 
-    private MutableAsciiBuffer buffer = new MutableAsciiBuffer(new byte[LENGTH]);
-    private OtfMessageAcceptor mockAcceptor = mock(OtfMessageAcceptor.class);
-    private IntDictionary groupToField = new IntDictionary();
-    private OtfParser parser = new OtfParser(mockAcceptor, groupToField);
+    private final MutableAsciiBuffer buffer = new MutableAsciiBuffer(new byte[LENGTH]);
+    private final OtfMessageAcceptor mockAcceptor = mock(OtfMessageAcceptor.class);
+    private final LongDictionary groupToField = new LongDictionary();
+    private final OtfParser parser = new OtfParser(mockAcceptor, groupToField);
 
-    private InOrder inOrder = inOrder(mockAcceptor);
-
-    @Rule
-    public ExpectedException thrown = ExpectedException.none();
+    private final InOrder inOrder = inOrder(mockAcceptor);
 
     @Theory
     public void notifiesAcceptorOfMessageStart(final int offset)
@@ -71,10 +67,17 @@ public class OtfParserTest
 
         when(mockAcceptor.onNext()).thenThrow(new IllegalArgumentException(errorMessage));
 
-        thrown.expect(IllegalArgumentException.class);
-        thrown.expectMessage(errorMessage);
+        try
+        {
+            parser.onMessage(buffer, offset, MSG_LEN);
+        }
+        catch (final IllegalArgumentException ex)
+        {
+            assertEquals(errorMessage, ex.getMessage());
+            return;
+        }
 
-        parser.onMessage(buffer, offset, MSG_LEN);
+        fail("expected IllegalArgumentException");
     }
 
     @Theory
@@ -134,7 +137,7 @@ public class OtfParserTest
 
         parser.onMessage(buffer, offset, INVALID_CHECKSUM_LEN);
 
-        verify(mockAcceptor).onError(eq(INVALID_CHECKSUM), eq((int)'D'), eq(10), any(AsciiFieldFlyweight.class));
+        verify(mockAcceptor).onError(eq(INVALID_CHECKSUM), eq((long)'D'), eq(10), any(AsciiFieldFlyweight.class));
     }
 
     @Theory
@@ -144,7 +147,7 @@ public class OtfParserTest
 
         parser.onMessage(buffer, offset, INVALID_LEN);
 
-        verify(mockAcceptor).onError(eq(PARSE_ERROR), eq((int)'D'), eq(11), any(AsciiFieldFlyweight.class));
+        verify(mockAcceptor).onError(eq(PARSE_ERROR), eq((long)'D'), eq(11), any(AsciiFieldFlyweight.class));
     }
 
     @Theory

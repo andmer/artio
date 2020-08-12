@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,6 @@ import org.agrona.concurrent.AgentRunner;
 import uk.co.real_logic.artio.dictionary.generation.Exceptions;
 
 import static org.agrona.concurrent.AgentRunner.startOnThread;
-import static uk.co.real_logic.artio.CommonConfiguration.backoffIdleStrategy;
 
 public class LockStepFramerEngineScheduler implements EngineScheduler
 {
@@ -52,15 +51,21 @@ public class LockStepFramerEngineScheduler implements EngineScheduler
         }
 
         archivingRunner = new AgentRunner(
-            configuration.archiverIdleStrategy(), errorHandler, null, indexingAgent);
+            configuration.archiverIdleStrategy(),
+            errorHandler,
+            null,
+            indexingAgent);
 
-        startOnThread(archivingRunner);
+        startOnThread(archivingRunner, configuration.threadFactory());
 
         if (monitoringAgent != null)
         {
             monitoringRunner = new AgentRunner(
-                backoffIdleStrategy(), errorHandler, null, monitoringAgent);
-            startOnThread(monitoringRunner);
+                configuration.monitoringThreadIdleStrategy(),
+                errorHandler,
+                null,
+                monitoringAgent);
+            startOnThread(monitoringRunner, configuration.threadFactory());
         }
     }
 

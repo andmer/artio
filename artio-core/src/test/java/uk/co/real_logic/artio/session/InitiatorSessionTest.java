@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,8 @@
 package uk.co.real_logic.artio.session;
 
 import org.junit.Test;
+import uk.co.real_logic.artio.Clock;
+import uk.co.real_logic.artio.protocol.GatewayPublication;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
@@ -25,16 +27,19 @@ import static org.mockito.Mockito.*;
 import static uk.co.real_logic.artio.CommonConfiguration.DEFAULT_SESSION_BUFFER_SIZE;
 import static uk.co.real_logic.artio.engine.EngineConfiguration.DEFAULT_REASONABLE_TRANSMISSION_TIME_IN_MS;
 import static uk.co.real_logic.artio.messages.SessionState.*;
-import static uk.co.real_logic.artio.session.SessionProxy.NO_LAST_MSG_SEQ_NUM_PROCESSED;
+import static uk.co.real_logic.artio.session.DirectSessionProxy.NO_LAST_MSG_SEQ_NUM_PROCESSED;
+import static uk.co.real_logic.artio.session.Session.UNKNOWN_TIME;
 
 public class InitiatorSessionTest extends AbstractSessionTest
 {
-    private InitiatorSession session;
+    private final InitiatorSession session;
     {
         session = new InitiatorSession(HEARTBEAT_INTERVAL,
             CONNECTION_ID,
             fakeClock,
+            Clock.systemNanoTime(),
             sessionProxy,
+            mock(GatewayPublication.class),
             mockPublication,
             idStrategy,
             SENDING_TIME_WINDOW,
@@ -47,8 +52,12 @@ public class InitiatorSessionTest extends AbstractSessionTest
             false,
             DEFAULT_REASONABLE_TRANSMISSION_TIME_IN_MS,
             new MutableAsciiBuffer(new byte[DEFAULT_SESSION_BUFFER_SIZE]),
-            false);
-        session.logonListener(mockLogonListener);
+            false,
+            SessionCustomisationStrategy.none(),
+            messageInfo,
+            fakeEpochFractionClock);
+        session.fixDictionary(makeDictionary());
+        session.sessionProcessHandler(mockLogonListener);
     }
 
     @Test
@@ -126,8 +135,8 @@ public class InitiatorSessionTest extends AbstractSessionTest
 
     private void verifyLogon()
     {
-        verify(sessionProxy, times(1)).logon(
-            HEARTBEAT_INTERVAL, 1, null, null, false, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy, times(1)).sendLogon(
+            1, HEARTBEAT_INTERVAL, null, null, false, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
     protected void readyForLogon()
@@ -142,7 +151,7 @@ public class InitiatorSessionTest extends AbstractSessionTest
 
     private void assertHasLogonTime()
     {
-        assertTrue(session().hasLogonTime());
+        assertTrue(session().lastLogonTime() != UNKNOWN_TIME);
     }
 
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,48 +16,131 @@
 package uk.co.real_logic.artio.engine.framer;
 
 import io.aeron.logbuffer.ControlledFragmentHandler;
-import io.aeron.logbuffer.BufferClaim;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
 import org.agrona.MutableDirectBuffer;
-import org.agrona.concurrent.EpochClock;
 import uk.co.real_logic.artio.DebugLogger;
+import uk.co.real_logic.artio.Pressure;
+import uk.co.real_logic.artio.builder.AbstractSequenceResetEncoder;
 import uk.co.real_logic.artio.builder.Encoder;
-import uk.co.real_logic.artio.builder.HeaderEncoder;
-import uk.co.real_logic.artio.builder.SequenceResetEncoder;
-import uk.co.real_logic.artio.decoder.HeaderDecoder;
-import uk.co.real_logic.artio.decoder.HeartbeatDecoder;
-import uk.co.real_logic.artio.decoder.SequenceResetDecoder;
-import uk.co.real_logic.artio.engine.PossDupEnabler;
-import uk.co.real_logic.artio.engine.logger.ReplayOperation;
-import uk.co.real_logic.artio.engine.logger.ReplayQuery;
+import uk.co.real_logic.artio.builder.SessionHeaderEncoder;
+import uk.co.real_logic.artio.decoder.SessionHeaderDecoder;
+import uk.co.real_logic.artio.engine.logger.*;
+import uk.co.real_logic.artio.fields.EpochFractionFormat;
 import uk.co.real_logic.artio.fields.UtcTimestampEncoder;
-import uk.co.real_logic.artio.messages.FixMessageDecoder;
-import uk.co.real_logic.artio.messages.FixMessageEncoder;
-import uk.co.real_logic.artio.messages.MessageHeaderDecoder;
-import uk.co.real_logic.artio.messages.MessageHeaderEncoder;
+import uk.co.real_logic.artio.messages.*;
 import uk.co.real_logic.artio.protocol.GatewayPublication;
 import uk.co.real_logic.artio.util.AsciiBuffer;
+import uk.co.real_logic.artio.util.CharFormatter;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
+
+import java.util.concurrent.TimeUnit;
 
 import static io.aeron.Publication.BACK_PRESSURED;
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.ABORT;
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
 import static uk.co.real_logic.artio.LogTag.CATCHUP;
+import static uk.co.real_logic.artio.dictionary.SessionConstants.HEARTBEAT_MESSAGE_TYPE;
+import static uk.co.real_logic.artio.dictionary.SessionConstants.SEQUENCE_RESET_MESSAGE_TYPE;
+import static uk.co.real_logic.artio.messages.FixMessageDecoder.*;
 import static uk.co.real_logic.artio.messages.MessageStatus.CATCHUP_REPLAY;
 import static uk.co.real_logic.artio.messages.SessionReplyStatus.MISSING_MESSAGES;
 import static uk.co.real_logic.artio.messages.SessionReplyStatus.OK;
 
 public class CatchupReplayer implements ControlledFragmentHandler, Continuation
 {
+
+    public static class Formatters
+    {
+        private final CharFormatter attemptFormatter =
+            new CharFormatter("Attempt replay for sessionId=%s%n");
+        private final CharFormatter okFormatter =
+            new CharFormatter("OK for sessionId=%s%n");
+        private final CharFormatter missingFormatter =
+            new CharFormatter("Missing Messages for sessionId=%s%n");
+        private final CharFormatter awaitIndexFormatter = new CharFormatter(
+            "Awaiting index position: indexed=%s vs required=%s%n");
+        private final CharFormatter replayQueryingFormatter = new CharFormatter(
+            "Querying for sessionId=%s, currently at (%s, %s)%n");
+    }
+
     private static final int ENCODE_BUFFER_SIZE = 8 * 1024;
 
     public static final int FRAME_LENGTH =
         MessageHeaderEncoder.ENCODED_LENGTH + FixMessageEncoder.BLOCK_LENGTH + FixMessageEncoder.bodyHeaderLength();
 
+    enum ReplayFor
+    {
+        REPLAY_MESSAGES
+        {
+            long sendOk(
+                final GatewayPublication publication,
+                final int libraryId,
+                final long correlationId,
+                final GatewaySession session)
+            {
+                return publication.saveReplayMessagesReply(
+                    libraryId, correlationId, ReplayMessagesStatus.OK);
+            }
+
+            long sendMissing(
+                final GatewayPublication publication,
+                final int libraryId,
+                final long correlationId,
+                final GatewaySession session)
+            {
+                return publication.saveReplayMessagesReply(
+                    libraryId, correlationId, ReplayMessagesStatus.MISSING_MESSAGES);
+            }
+        },
+        REQUEST_SESSION
+        {
+            long sendOk(
+                final GatewayPublication publication,
+                final int libraryId,
+                final long correlationId,
+                final GatewaySession session)
+            {
+                final long position = publication.saveRequestSessionReply(libraryId, OK, correlationId);
+                if (position > 0)
+                {
+                    session.play();
+                }
+                return position;
+            }
+
+            long sendMissing(
+                final GatewayPublication publication,
+                final int libraryId,
+                final long correlationId,
+                final GatewaySession session)
+            {
+                final long position = publication.saveRequestSessionReply(libraryId, MISSING_MESSAGES, correlationId);
+                if (position > 0)
+                {
+                    session.play();
+                }
+                return position;
+            }
+        };
+
+        abstract long sendOk(
+            GatewayPublication publication,
+            int libraryId,
+            long correlationId,
+            GatewaySession session);
+
+        abstract long sendMissing(
+            GatewayPublication publication,
+            int libraryId,
+            long correlationId,
+            GatewaySession session);
+    }
+
     private enum State
     {
+        AWAITING_INDEX,
         REPLAY_QUERY,
         REPLAYING,
         SEND_MISSING,
@@ -71,26 +154,30 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
     private final FixMessageEncoder messageEncoder = new FixMessageEncoder();
 
     private final AsciiBuffer asciiBuffer = new MutableAsciiBuffer();
-    private final HeaderDecoder headerDecoder = new HeaderDecoder();
-    private final BufferClaim bufferClaim = new BufferClaim();
 
-    private final PossDupEnabler possDupEnabler;
+    private final SequenceNumberIndexReader receivedSequenceNumberIndex;
     private final ReplayQuery inboundMessages;
     private final GatewayPublication inboundPublication;
     private final ErrorHandler errorHandler;
     private final long correlationId;
     private final long connectionId;
     private final int libraryId;
-    private final int lastReceivedSeqNum;
-    private final int currentSequenceIndex;
+    private final int replayToSequenceNumber;
+    private final int replayToSequenceIndex;
     private final GatewaySession session;
     private final long catchupEndTimeInMs;
+    private final long requiredPosition;
+    private final SessionHeaderDecoder headerDecoder;
+    private final ReplayFor replayFor;
+    private final Formatters formatters;
+    private final EpochFractionFormat epochFractionFormat;
 
     private int replayFromSequenceNumber;
     private int replayFromSequenceIndex;
-    private State state = State.REPLAY_QUERY;
+    private State state = State.AWAITING_INDEX;
+    private String missingMessagesReason;
 
-    private SequenceResetEncoder sequenceResetEncoder;
+    private AbstractSequenceResetEncoder sequenceResetEncoder;
     private UtcTimestampEncoder timestampEncoder;
     private MutableAsciiBuffer encodeBuffer;
 
@@ -99,44 +186,44 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
     private ReplayOperation replayOperation = null;
 
     CatchupReplayer(
+        final SequenceNumberIndexReader receivedSequenceNumberIndex,
         final ReplayQuery inboundMessages,
         final GatewayPublication inboundPublication,
         final ErrorHandler errorHandler,
         final long correlationId,
         final long connectionId,
         final int libraryId,
-        final int lastReceivedSeqNum,
-        final int currentSequenceIndex,
+        final int replayToSequenceNumber,
+        final int replayToSequenceIndex,
         final int replayFromSequenceNumber,
         final int replayFromSequenceIndex,
         final GatewaySession session,
-        final long catchupTimeout,
-        final EpochClock clock)
+        final long catchupEndTimeInMs,
+        final ReplayFor replayFor,
+        final Formatters formatters,
+        final EpochFractionFormat epochFractionFormat)
     {
+        this.receivedSequenceNumberIndex = receivedSequenceNumberIndex;
         this.inboundMessages = inboundMessages;
         this.inboundPublication = inboundPublication;
         this.errorHandler = errorHandler;
         this.correlationId = correlationId;
         this.connectionId = connectionId;
         this.libraryId = libraryId;
-        this.lastReceivedSeqNum = lastReceivedSeqNum;
-        this.currentSequenceIndex = currentSequenceIndex;
+        this.replayToSequenceNumber = replayToSequenceNumber;
+        this.replayToSequenceIndex = replayToSequenceIndex;
         this.replayFromSequenceNumber = replayFromSequenceNumber;
         this.replayFromSequenceIndex = replayFromSequenceIndex;
         this.session = session;
-        this.catchupEndTimeInMs = clock.time() + catchupTimeout;
-
-        possDupEnabler = new PossDupEnabler(
-            bufferClaim,
-            this::claimBuffer,
-            this::onPreCommit,
-            this::onIllegalState,
-            errorHandler,
-            clock,
-            inboundPublication.maxPayloadLength());
+        this.catchupEndTimeInMs = catchupEndTimeInMs;
+        this.requiredPosition = inboundPublication.position();
+        this.headerDecoder = session.fixDictionary().makeHeaderDecoder();
+        this.replayFor = replayFor;
+        this.formatters = formatters;
+        this.epochFractionFormat = epochFractionFormat;
     }
 
-    private void onPreCommit(final MutableDirectBuffer buffer, final int offset)
+    private void updateMessageHeader(final MutableDirectBuffer buffer, final int offset)
     {
         final int frameOffset = offset + MessageHeaderEncoder.ENCODED_LENGTH;
         messageEncoder
@@ -146,37 +233,33 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
             .status(CATCHUP_REPLAY);
     }
 
-    private void onIllegalState(final String msg)
-    {
-        errorHandler.onError(new IllegalStateException(msg));
-    }
-
-    private boolean claimBuffer(final int length)
-    {
-        return inboundPublication.claim(length, bufferClaim) > 0;
-    }
-
     public Action onFragment(
         final DirectBuffer srcBuffer,
         final int srcOffset,
         final int srcLength,
         final Header header)
     {
-        final int messageLength = srcLength - FRAME_LENGTH;
-        final int messageOffset = srcOffset + FRAME_LENGTH;
-
         messageHeaderDecoder.wrap(srcBuffer, srcOffset);
 
+        final int version = messageHeaderDecoder.version();
         messageDecoder.wrap(
             srcBuffer,
             srcOffset + MessageHeaderDecoder.ENCODED_LENGTH,
             messageHeaderDecoder.blockLength(),
-            messageHeaderDecoder.version());
+            version);
+
+        final long messageType = MessageTypeExtractor.getMessageType(messageDecoder);
+
+        final int metaDataLength = messageDecoder.skipMetaData();
+        final int metaDataAdjustment = version >= metaDataSinceVersion() ? metaDataLength + metaDataHeaderLength() : 0;
+
+        final int messageLength = messageDecoder.bodyLength();
+        final int messageOffset = messageDecoder.limit() + bodyHeaderLength();
 
         asciiBuffer.wrap(srcBuffer, messageOffset, messageLength);
         headerDecoder.decode(asciiBuffer, 0, messageLength);
 
-        if (messageDecoder.messageType() == HeartbeatDecoder.MESSAGE_TYPE)
+        if (messageType == HEARTBEAT_MESSAGE_TYPE)
         {
             if (heartbeatRangeSequenceNumberStart == OUT_OF_RANGE)
             {
@@ -195,7 +278,8 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
                 }
             }
 
-            return processNormalMessage(srcBuffer, srcOffset, srcLength, messageLength, messageOffset);
+            return processNormalMessage(
+                srcBuffer, srcOffset, srcLength);
         }
     }
 
@@ -203,12 +287,13 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
     {
         if (sequenceResetEncoder == null)
         {
-            sequenceResetEncoder = new SequenceResetEncoder();
-            timestampEncoder = new UtcTimestampEncoder();
+            sequenceResetEncoder = session.fixDictionary().makeSequenceResetEncoder();
+            timestampEncoder = new UtcTimestampEncoder(epochFractionFormat);
             encodeBuffer = new MutableAsciiBuffer(new byte[ENCODE_BUFFER_SIZE]);
             sequenceResetEncoder.gapFillFlag(true);
 
-            final HeaderEncoder header = sequenceResetEncoder.header();
+            final SessionHeaderEncoder header = sequenceResetEncoder.header()
+                .possDupFlag(true);
 
             header.senderCompID(headerDecoder.senderCompID());
             if (headerDecoder.hasSenderSubID())
@@ -236,14 +321,14 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
         sequenceResetEncoder.header().msgSeqNum(heartbeatRangeSequenceNumberStart);
         sequenceResetEncoder.newSeqNo(heartbeatRangeSequenceNumberEnd);
         sequenceResetEncoder.header().sendingTime(
-            timestampEncoder.buffer(), timestampEncoder.encode(System.currentTimeMillis()));
+            timestampEncoder.buffer(), timestampEncoder.encodeFrom(System.currentTimeMillis(), TimeUnit.MILLISECONDS));
 
         final long result = sequenceResetEncoder.encode(encodeBuffer, 0);
         final int encodedLength = Encoder.length(result);
         final int encodedOffset = Encoder.offset(result);
         final boolean sent = inboundPublication.saveMessage(
             encodeBuffer, encodedOffset, encodedLength,
-            libraryId, SequenceResetDecoder.MESSAGE_TYPE,
+            libraryId, SEQUENCE_RESET_MESSAGE_TYPE,
             messageDecoder.session(), replayFromSequenceIndex, libraryId,
             CATCHUP_REPLAY, heartbeatRangeSequenceNumberEnd) > 0;
 
@@ -258,12 +343,11 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
     private Action processNormalMessage(
         final DirectBuffer srcBuffer,
         final int srcOffset,
-        final int srcLength,
-        final int messageLength,
-        final int messageOffset)
+        final int srcLength)
     {
-        final Action action = possDupEnabler.enablePossDupFlag(
-            srcBuffer, messageOffset, messageLength, srcOffset, srcLength);
+        updateMessageHeader((MutableDirectBuffer)srcBuffer, srcOffset);
+
+        final Action action = Pressure.apply(inboundPublication.offer(srcBuffer, srcOffset, srcLength));
         if (action == CONTINUE)
         {
             // store the point to continue from if an abort happens.
@@ -275,27 +359,50 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
 
     public long attempt()
     {
-        DebugLogger.log(CATCHUP, "Attempt replay for %d%n", session.sessionId());
+        if (DebugLogger.isEnabled(CATCHUP))
+        {
+            DebugLogger.log(CATCHUP, formatters.attemptFormatter.clear().with(session.sessionId()));
+        }
+
         switch (state)
         {
+            case AWAITING_INDEX:
+            {
+                final long indexedPosition = receivedSequenceNumberIndex.indexedPosition(inboundPublication.id());
+
+                if (indexedPosition >= requiredPosition)
+                {
+                    state = State.REPLAY_QUERY;
+                }
+                else
+                {
+                    DebugLogger.log(CATCHUP,
+                        formatters.awaitIndexFormatter,
+                        indexedPosition,
+                        requiredPosition);
+                }
+                return BACK_PRESSURED;
+            }
+
             case REPLAY_QUERY:
             {
                 if (notLoggingInboundMessages())
                 {
-                    return switchToMissingMessages();
+                    return switchToMissingMessages("Not logging inbound messages");
                 }
 
                 DebugLogger.log(CATCHUP,
-                    "Querying for %d, currently at (%d, %d)%n",
-                    session.sessionId(), lastReceivedSeqNum, currentSequenceIndex);
+                    formatters.replayQueryingFormatter,
+                    session.sessionId(), replayToSequenceNumber, replayToSequenceIndex);
 
                 replayOperation = inboundMessages.query(
-                    this,
                     session.sessionId(),
                     replayFromSequenceNumber,
                     replayFromSequenceIndex,
-                    lastReceivedSeqNum,
-                    currentSequenceIndex);
+                    replayToSequenceNumber,
+                    replayToSequenceIndex,
+                    CATCHUP,
+                    new FixMessageTracker(CATCHUP, this, session.sessionId()));
 
                 state = State.REPLAYING;
 
@@ -307,14 +414,14 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
                 // Timeout the catchup operations
                 if (System.currentTimeMillis() > catchupEndTimeInMs)
                 {
-                    return switchToMissingMessages();
+                    return switchToMissingMessages("Catchup operation timed out");
                 }
 
                 if (replayOperation.attemptReplay())
                 {
                     if (hasMissingMessages())
                     {
-                        return switchToMissingMessages();
+                        return switchToMissingMessages("Is missing messages from replay index query");
                     }
                     else
                     {
@@ -347,15 +454,16 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
         }
     }
 
-    private long switchToMissingMessages()
+    private long switchToMissingMessages(final String reason)
     {
         state = State.SEND_MISSING;
+        missingMessagesReason = reason;
         return sendMissingMessages();
     }
 
     private boolean hasMissingMessages()
     {
-        return replayFromSequenceIndex < currentSequenceIndex || replayFromSequenceNumber < lastReceivedSeqNum;
+        return replayFromSequenceIndex < replayToSequenceIndex || replayFromSequenceNumber < replayToSequenceNumber;
     }
 
     private boolean notLoggingInboundMessages()
@@ -368,42 +476,61 @@ public class CatchupReplayer implements ControlledFragmentHandler, Continuation
         final long correlationId,
         final GatewaySession session)
     {
-        return sendOk(publication, correlationId, session, libraryId);
+        if (DebugLogger.isEnabled(CATCHUP))
+        {
+            DebugLogger.log(CATCHUP, formatters.okFormatter.clear().with(session.sessionId()));
+        }
+
+        return replayFor.sendOk(publication, libraryId, correlationId, session);
     }
 
     static long sendOk(
         final GatewayPublication publication,
         final long correlationId,
         final GatewaySession session,
-        final int libraryId)
+        final int libraryId,
+        final CatchupReplayer.Formatters formatters)
     {
-        DebugLogger.log(CATCHUP, "OK for %d%n", session.sessionId());
-        final long position = publication.saveRequestSessionReply(libraryId, OK, correlationId);
-        if (position >= 0)
+        if (DebugLogger.isEnabled(CATCHUP))
         {
-            session.play();
+            DebugLogger.log(CATCHUP, formatters.okFormatter.clear().with(session.sessionId()));
+        }
+
+        return ReplayFor.REQUEST_SESSION.sendOk(publication, libraryId, correlationId, session);
+    }
+
+    private long sendMissingMessages()
+    {
+        if (DebugLogger.isEnabled(CATCHUP))
+        {
+            DebugLogger.log(CATCHUP, formatters.missingFormatter.clear().with(session.sessionId()));
+        }
+
+        final long position = replayFor.sendMissing(inboundPublication, libraryId, correlationId, session);
+
+        if (position > 0)
+        {
+            errorHandler.onError(new IllegalStateException(String.format(
+                "Failed to read correct number of messages for sessionId=%d," +
+                " finished at [%d, %d] instead of [%d, %d] - %s",
+                session.sessionId(),
+                replayFromSequenceIndex,
+                replayFromSequenceNumber,
+                replayToSequenceIndex,
+                replayToSequenceNumber,
+                missingMessagesReason)));
+
+            missingMessagesReason = null;
         }
 
         return position;
     }
 
-    private long sendMissingMessages()
+    public void close()
     {
-        DebugLogger.log(CATCHUP, "Missing Messages for %d%n", session.sessionId());
-        final long position = inboundPublication.saveRequestSessionReply(libraryId, MISSING_MESSAGES, correlationId);
-        if (position > 0)
+        if (replayOperation != null)
         {
-            errorHandler.onError(new IllegalStateException(String.format(
-                "Failed to read correct number of messages for %d, finished at [%d, %d] instead of [%d, %d]",
-                correlationId,
-                replayFromSequenceIndex,
-                replayFromSequenceNumber,
-                currentSequenceIndex,
-                lastReceivedSeqNum)));
-
-            session.play();
+            replayOperation.close();
         }
-
-        return position;
     }
 }

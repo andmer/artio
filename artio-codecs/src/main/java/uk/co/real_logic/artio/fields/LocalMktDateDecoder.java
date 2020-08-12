@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -52,7 +52,7 @@ public final class LocalMktDateDecoder
         final int endMonth = endYear + 2;
         final int endDay = endMonth + 2;
 
-        final int year = timestamp.getNatural(offset, endYear);
+        final int year = timestamp.parseNaturalIntAscii(offset, 4);
         final int month = getValidInt(timestamp, endYear, endMonth, 1, 12);
         final int day = getValidInt(timestamp, endMonth, endDay, 1, 31);
 

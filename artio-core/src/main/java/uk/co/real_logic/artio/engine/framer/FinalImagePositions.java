@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -31,18 +31,18 @@ class FinalImagePositions implements UnavailableImageHandler
     // If we ask for the position before the unavailable handler is called
     // then this value is put in the map so that we can check for its presence
     // and avoid leaking memory, reference comparison against this is deliberate
-    private static final Long LEAK_WITNESS = Long.valueOf(UNKNOWN_POSITION);
+    private static final Long LEAK_WITNESS = UNKNOWN_POSITION;
 
     // Hashtable picked over CHM due to low contention factor + expected small size
     private final Map<Integer, Long> sessionIdToPosition = new Hashtable<>();
 
     public void onUnavailableImage(final Image image)
     {
-        final Integer sessionId = Integer.valueOf(image.sessionId());
+        final Integer sessionId = image.sessionId();
         final long position = image.position();
 
         final Long old = sessionIdToPosition.remove(sessionId);
-        if (old != LEAK_WITNESS)
+        if (old != LEAK_WITNESS) // lgtm [java/reference-equality-of-boxed-types]
         {
             sessionIdToPosition.put(sessionId, position);
         }
@@ -56,7 +56,7 @@ class FinalImagePositions implements UnavailableImageHandler
 
     void removePosition(final int aeronSessionId)
     {
-        final Integer boxedAeronSessionId = Integer.valueOf(aeronSessionId);
+        final Integer boxedAeronSessionId = aeronSessionId;
         sessionIdToPosition.compute(boxedAeronSessionId, removeOrSetWitness);
     }
 

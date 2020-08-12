@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,12 +17,16 @@ package uk.co.real_logic.artio.system_tests;
 
 import io.aeron.logbuffer.ControlledFragmentHandler.Action;
 import org.agrona.DirectBuffer;
+import org.agrona.ExpandableArrayBuffer;
+import org.agrona.concurrent.UnsafeBuffer;
 import uk.co.real_logic.artio.Timing;
-import uk.co.real_logic.artio.dictionary.IntDictionary;
+import uk.co.real_logic.artio.dictionary.LongDictionary;
 import uk.co.real_logic.artio.library.*;
 import uk.co.real_logic.artio.messages.DisconnectReason;
+import uk.co.real_logic.artio.messages.MetaDataStatus;
 import uk.co.real_logic.artio.otf.OtfParser;
 import uk.co.real_logic.artio.session.Session;
+import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
 import java.util.*;
 
@@ -30,24 +34,46 @@ import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
 import static org.junit.Assert.assertNotEquals;
 
 public class FakeHandler
-    implements SessionHandler, SessionAcquireHandler, SessionExistsHandler, SentPositionHandler
+    implements SessionHandler, SessionAcquireHandler, SessionExistsHandler
 {
     private final OtfParser parser;
     private final FakeOtfAcceptor acceptor;
 
     private final List<Session> sessions = new ArrayList<>();
     private final Set<Session> slowSessions = new HashSet<>();
-    private final Deque<CompleteSessionId> completeSessionIds = new ArrayDeque<>();
+    private final Deque<SessionExistsInfo> sessionExistsInfos = new ArrayDeque<>();
 
     private Session lastSession;
     private boolean hasDisconnected = false;
-    private long sentPosition;
     private boolean lastSessionWasSlow;
+    private UnsafeBuffer lastSessionMetaData;
+    private MetaDataStatus lastSessionMetaDataStatus;
+
+    private final ExpandableArrayBuffer lastMessageBuffer = new ExpandableArrayBuffer();
+    private final MutableAsciiBuffer lastMessage = new MutableAsciiBuffer(lastMessageBuffer);
+    private int lastMessageLength = 0;
 
     public FakeHandler(final FakeOtfAcceptor acceptor)
     {
         this.acceptor = acceptor;
-        parser = new OtfParser(acceptor, new IntDictionary());
+        parser = new OtfParser(acceptor, new LongDictionary());
+    }
+
+    private boolean copyMessages = false;
+
+    public void copyMessages(final boolean copyMessages)
+    {
+        this.copyMessages = copyMessages;
+    }
+
+    public int lastMessageLength()
+    {
+        return lastMessageLength;
+    }
+
+    public MutableAsciiBuffer lastMessage()
+    {
+        return lastMessage;
     }
 
     // ----------- EVENTS -----------
@@ -59,13 +85,24 @@ public class FakeHandler
         final int libraryId,
         final Session session,
         final int sequenceIndex,
-        final int messageType,
+        final long messageType,
         final long timestampInNs,
-        final long position)
+        final long position,
+        final OnMessageInfo messageInfo)
     {
         parser.onMessage(buffer, offset, length);
-        acceptor.lastReceivedMessage().sequenceIndex(sequenceIndex);
+        final FixMessage parsedMessage = acceptor.lastReceivedMessage();
+        parsedMessage.sequenceIndex(sequenceIndex);
+        parsedMessage.status(messageInfo.status());
+        parsedMessage.isValid(messageInfo.isValid());
         acceptor.forSession(session);
+
+        if (copyMessages)
+        {
+            lastMessageBuffer.putBytes(0, buffer, offset, length);
+            lastMessageLength = length;
+        }
+
         return CONTINUE;
     }
 
@@ -96,19 +133,18 @@ public class FakeHandler
     {
     }
 
-    public SessionHandler onSessionAcquired(final Session session, final boolean isSlow)
+    public SessionHandler onSessionAcquired(final Session session, final SessionAcquiredInfo acquiredInfo)
     {
         assertNotEquals(Session.UNKNOWN, session.id());
         sessions.add(session);
         this.lastSession = session;
-        this.lastSessionWasSlow = isSlow;
-        return this;
-    }
+        this.lastSessionWasSlow = acquiredInfo.isSlow();
 
-    public Action onSendCompleted(final long position)
-    {
-        this.sentPosition = position;
-        return CONTINUE;
+        final DirectBuffer metaDataBuffer = acquiredInfo.metaDataBuffer();
+        this.lastSessionMetaDataStatus = acquiredInfo.metaDataStatus();
+        this.lastSessionMetaData = new UnsafeBuffer(new byte[metaDataBuffer.capacity()]);
+        this.lastSessionMetaData.putBytes(0, metaDataBuffer, 0, metaDataBuffer.capacity());
+        return this;
     }
 
     public void onSessionExists(
@@ -119,9 +155,13 @@ public class FakeHandler
         final String localLocationId,
         final String remoteCompId,
         final String remoteSubId,
-        final String remoteLocationId)
+        final String remoteLocationId,
+        final int logonReceivedSequenceNumber,
+        final int logonSequenceIndex)
     {
-        completeSessionIds.add(new CompleteSessionId(localCompId, remoteCompId, surrogateSessionId));
+        sessionExistsInfos.add(
+            new SessionExistsInfo(
+            localCompId, remoteCompId, surrogateSessionId, logonReceivedSequenceNumber, logonSequenceIndex));
     }
 
     // ----------- END EVENTS -----------
@@ -146,7 +186,7 @@ public class FakeHandler
         return awaitCompleteSessionId(poller).surrogateId();
     }
 
-    public CompleteSessionId awaitCompleteSessionId(final Runnable poller)
+    public SessionExistsInfo awaitCompleteSessionId(final Runnable poller)
     {
         Timing.assertEventuallyTrue(
             "Couldn't find session Id",
@@ -156,22 +196,17 @@ public class FakeHandler
                 return hasSeenSession();
             });
 
-        return lastSessionId();
+        return lastSessionExistsInfo();
     }
 
     public boolean hasSeenSession()
     {
-        return !completeSessionIds.isEmpty();
+        return !sessionExistsInfos.isEmpty();
     }
 
-    public void clearSessions()
+    public void clearSessionExistsInfos()
     {
-        completeSessionIds.clear();
-    }
-
-    public long sentPosition()
-    {
-        return sentPosition;
+        sessionExistsInfos.clear();
     }
 
     long awaitSessionIdFor(
@@ -186,7 +221,7 @@ public class FakeHandler
             {
                 poller.run();
 
-                return completeSessionIds
+                return sessionExistsInfos
                     .stream()
                     .filter((sid) ->
                         sid.remoteCompId().equals(initiatorId) && sid.localCompId().equals(acceptorId))
@@ -197,12 +232,22 @@ public class FakeHandler
 
     public String lastAcceptorCompId()
     {
-        return lastSessionId().localCompId();
+        return lastSessionExistsInfo().localCompId();
     }
 
     public String lastInitiatorCompId()
     {
-        return lastSessionId().remoteCompId();
+        return lastSessionExistsInfo().remoteCompId();
+    }
+
+    public int lastLogonReceivedSequenceNumber()
+    {
+        return lastSessionExistsInfo().logonReceivedSequenceNumber();
+    }
+
+    public int lastLogonSequenceIndex()
+    {
+        return lastSessionExistsInfo().logonSequenceIndex();
     }
 
     public Session lastSession()
@@ -210,9 +255,9 @@ public class FakeHandler
         return lastSession;
     }
 
-    private CompleteSessionId lastSessionId()
+    private SessionExistsInfo lastSessionExistsInfo()
     {
-        return completeSessionIds.peekFirst();
+        return sessionExistsInfos.peekLast();
     }
 
     public boolean isSlow(final Session session)
@@ -225,4 +270,13 @@ public class FakeHandler
         return lastSessionWasSlow;
     }
 
+    public DirectBuffer lastSessionMetaData()
+    {
+        return lastSessionMetaData;
+    }
+
+    public MetaDataStatus lastSessionMetaDataStatus()
+    {
+        return lastSessionMetaDataStatus;
+    }
 }

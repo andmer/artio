@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,9 +15,7 @@
  */
 package uk.co.real_logic.artio.library;
 
-import io.aeron.Aeron;
-import io.aeron.exceptions.ConductorServiceTimeoutException;
-import org.agrona.ErrorHandler;
+import org.agrona.DirectBuffer;
 import org.agrona.IoUtil;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.SystemEpochClock;
@@ -25,8 +23,11 @@ import uk.co.real_logic.artio.CommonConfiguration;
 import uk.co.real_logic.artio.FixGatewayException;
 import uk.co.real_logic.artio.GatewayProcess;
 import uk.co.real_logic.artio.Reply;
+import uk.co.real_logic.artio.builder.SessionHeaderEncoder;
+import uk.co.real_logic.artio.messages.MetaDataStatus;
 import uk.co.real_logic.artio.messages.SessionReplyStatus;
 import uk.co.real_logic.artio.session.Session;
+import uk.co.real_logic.artio.session.SessionWriter;
 import uk.co.real_logic.artio.timing.LibraryTimers;
 
 import java.io.File;
@@ -49,11 +50,22 @@ import static uk.co.real_logic.artio.dictionary.generation.Exceptions.closeAll;
 public class FixLibrary extends GatewayProcess
 {
     public static final int NO_MESSAGE_REPLAY = -1;
+    public static final int CURRENT_SEQUENCE = -2;
+
+    // FixLibrary instances throw exceptions up to their invokers. Aeron catches exceptions in methods like
+    // Image.controlledPoll. This thread local is used to indicate which thread is a client conductor thread
+    // and thus can't safely rethrow the exception
+    private static final ThreadLocal<Boolean> RETHROW_EXCEPTION = ThreadLocal.withInitial(() -> true);
 
     private final LibraryConfiguration configuration;
     private final LibraryScheduler scheduler;
     private final LibraryPoller poller;
     private boolean isPolling = false;
+
+    static void setClientConductorThread()
+    {
+        RETHROW_EXCEPTION.set(false);
+    }
 
     FixLibrary(final LibraryConfiguration configuration)
     {
@@ -66,7 +78,7 @@ public class FixLibrary extends GatewayProcess
             scheduler.configure(configuration.aeronContext());
             init(configuration);
             final LibraryTimers timers = new LibraryTimers(configuration.clock());
-            initMonitoringAgent(timers.all(), configuration);
+            initMonitoringAgent(timers.all(), configuration, null);
 
             final LibraryTransport transport = new LibraryTransport(configuration, fixCounters, aeron);
             poller = new LibraryPoller(
@@ -103,38 +115,8 @@ public class FixLibrary extends GatewayProcess
     private FixLibrary connect()
     {
         poller.startConnecting();
-        final ErrorHandler remoteThreadErrorHandler = createRemoteThreadErrorHandler(errorHandler);
-        scheduler.launch(configuration, remoteThreadErrorHandler, monitoringAgent, conductorAgent());
+        scheduler.launch(configuration, errorHandler, monitoringAgent, conductorAgent());
         return this;
-    }
-
-    protected Aeron.Context configureAeronContext(final CommonConfiguration configuration)
-    {
-        final Aeron.Context context = super.configureAeronContext(configuration);
-        final ErrorHandler errorHandler = context.errorHandler();
-        context.errorHandler(createRemoteThreadErrorHandler(errorHandler));
-        return context;
-    }
-
-    private ErrorHandler createRemoteThreadErrorHandler(final ErrorHandler innerHandler)
-    {
-        return (e) ->
-        {
-            if (e instanceof ConductorServiceTimeoutException)
-            {
-                // Currently only post specifically exceptions that we know need the library to be closed.
-                FixLibrary.this.postExceptionToLibraryThread(e);
-            }
-            else
-            {
-                innerHandler.onError(e);
-            }
-        };
-    }
-
-    private void postExceptionToLibraryThread(final Throwable e)
-    {
-        this.poller.postExceptionToLibraryThread(e);
     }
 
     // ------------- Public API -------------
@@ -191,6 +173,11 @@ public class FixLibrary extends GatewayProcess
         return poller.isConnected();
     }
 
+    public boolean isAtEndOfDay()
+    {
+        return poller.isAtEndOfDay();
+    }
+
     public boolean isClosed()
     {
         return poller.isClosed();
@@ -238,22 +225,44 @@ public class FixLibrary extends GatewayProcess
 
     private void deleteFiles()
     {
-        removeParentDirectory(configuration.histogramLoggingFile());
-        removeParentDirectory(configuration.monitoringFile());
-    }
-
-    private void removeParentDirectory(final String path)
-    {
-        final File parentFile = new File(path).getParentFile();
-        if (parentFile.exists())
+        if (configuration.gracefulShutdown())
         {
-            IoUtil.delete(parentFile, true);
+            final boolean deletedHistogramFile = removeParentDirectory(configuration.histogramLoggingFile());
+            final boolean deletedMonitoringFile = removeParentDirectory(configuration.monitoringFile());
+
+            checkFileDeletion(deletedHistogramFile, configuration.histogramLoggingFile());
+            checkFileDeletion(deletedMonitoringFile, configuration.monitoringFile());
         }
     }
 
+    private void checkFileDeletion(final boolean deletedFile, final String path)
+    {
+        if (!deletedFile)
+        {
+            throw new FixGatewayException("Unable to delete: " + path);
+        }
+    }
+
+    private boolean removeParentDirectory(final String path)
+    {
+        final File file = new File(path);
+        if (file.exists() && !file.delete())
+        {
+            return false;
+        }
+
+        final File parentFile = file.getParentFile();
+        if (parentFile != null && parentFile.exists() && parentFile.listFiles().length == 0)
+        {
+            IoUtil.delete(parentFile, true);
+        }
+
+        return true;
+    }
+
     /**
-     * Initiate a FIX session with a FIX acceptor. This method returns a reply object
-     * wrapping the Session itself.
+     * Initiate a FIX session. Artio will connect to the specified FIX acceptor / server and attempt to logon.
+     * This method returns a reply object wrapping the Session itself.
      *
      * @param configuration the configuration to use for the session.
      * @return the session object for the session that you've initiated. It can return the following errors:
@@ -308,6 +317,9 @@ public class FixLibrary extends GatewayProcess
      * If this library instance is unknown to the gateway, for example if its heartbeating
      * mechanism has timed out due to {@link #poll(int)} not being called often enough.
      *
+     * If you request a session that exists in the engine but which is not connected then an offline session will be
+     * returned. This is a session whose state is disconnected and has no connection id, connectedHost or connectedPort.
+     *
      * @param sessionId the id of the session to acquire.
      * @param resendFromSequenceNumber the last received message sequence number
      *                                   that you know about. You will get a stream
@@ -317,8 +329,9 @@ public class FixLibrary extends GatewayProcess
      *                                   If you don't care about message replay then
      *                                   use {@link FixLibrary#NO_MESSAGE_REPLAY} as the parameter.
      * @param resendFromSequenceIndex the index of the sequence within which the resendFromSequenceNumber
-     *                      refers. If you don't care about message replay then use
-     *                      {@link FixLibrary#NO_MESSAGE_REPLAY} as the parameter.
+     *                      refers. if you wish to use the curren sequence (ie all messages since the latest logon
+     *                      then you can use {@link FixLibrary#CURRENT_SEQUENCE}.If you don't care about message replay
+     *                      then use {@link FixLibrary#NO_MESSAGE_REPLAY} as the parameter.
      * @param timeoutInMs the timeout for this operation
      * @return the reply object representing the result of the request.
      */
@@ -332,9 +345,123 @@ public class FixLibrary extends GatewayProcess
         return poller.requestSession(sessionId, resendFromSequenceNumber, resendFromSequenceIndex, timeoutInMs);
     }
 
+    /**
+     * NB: This is an experimental API and is subject to change or potentially removal.
+     *
+     * Creates a new SessionWriter for a specified session. This can be used in a clustered system to write messages
+     * outbound for a system on its primary node. In a clustered system the <code>SessionProxy</code> would be hooked so
+     * writing messages outbound on a normal Session object won't work.
+     *
+     * @param sessionId the id of the session to use.
+     * @param connectionId the id of the connection to use.
+     * @param sequenceIndex the sequence index that the SessionWriter should start at.
+     * @return the created SessionWriter
+     */
+    public SessionWriter sessionWriter(
+        final long sessionId, final long connectionId, final int sequenceIndex)
+    {
+        return poller.followerSession(sessionId, connectionId, sequenceIndex);
+    }
+
+    /**
+     * NB: This is an experimental API and is subject to change or potentially removal.
+     *
+     * Create a SessionWriter for a Session from a different Artio instance. This SessionWriter can be used in a
+     * clustered system to fill the archive on a follower node with FIX messages that have been replicated by a
+     * leader node.
+     *
+     * @param headerEncoder the message header that contains fields that identify the Session. You could set the
+     *                      senderCompId and targetCompId on this header for example if those are the fields used to
+     *                      identify your session.
+     * @param timeoutInMs the timeout required for this operation.
+     * @return a <code>Reply</code> that will eventually contain the <code>SessionWriter</code>.
+     */
+    public Reply<SessionWriter> followerSession(
+        final SessionHeaderEncoder headerEncoder, final long timeoutInMs)
+    {
+        return poller.followerSession(headerEncoder, timeoutInMs);
+    }
+
+    /**
+     * Write meta data associated with a session. Session meta-data is a sequence of bytes that application can
+     * associate with a session. It shares it's lifecycle with the current session - so whenever sequence numbers or
+     * seession ids are reset the old meta-data will be reset as well. If the session is persistent then the metadata
+     * persists over restarts.
+     *
+     * You can use session meta data to store information like ids for internal systems that correspond to
+     * FIX sessions.
+     *
+     * This method can be used both to update existing metadata and to initialise the sessions'
+     * metadata. When updating any metadata before the <code>metaDataOffset</code> position within the metadata buffer
+     * or after <code>metaDataOffset + length</code> will be left as previous. When i
+     *
+     * This is an asynchronous operation and the returned reply object should be checked for completion.
+     *
+     * @param sessionId the session id of the session that meta data is written to.
+     * @param metaDataUpdateOffset the offset within the session's metadata buffer. <code>0</code> should be used for
+     *                       initialization.
+     * @param buffer the buffer where the meta data to be written is stored.
+     * @param offset the offset within the buffer
+     * @param length the length of the data within the buffer.
+     * @return a Reply to indicate completion or an error code.
+     */
+    public Reply<MetaDataStatus> writeMetaData(
+        final long sessionId,
+        final int metaDataUpdateOffset,
+        final DirectBuffer buffer,
+        final int offset,
+        final int length)
+    {
+        return poller.writeMetaData(sessionId, metaDataUpdateOffset, buffer, offset, length);
+    }
+
+    /**
+     * Read the meta data associated with a session.
+     *
+     * @param sessionId the id of the session that meta data is read from.
+     * @param handler the callback that has the returned metadata.
+     */
+    public void readMetaData(
+        final long sessionId, final MetadataHandler handler)
+    {
+        poller.readMetaData(sessionId, handler);
+    }
+
     public String currentAeronChannel()
     {
         return poller.currentAeronChannel();
     }
 
+    /**
+     * Initiate an ILink3 connection. Artio will connect to the iLink server and attempt to logon.
+     * This method returns a reply object wrapping the Connection itself.
+     *
+     * NB: This is an experimental API and is subject to change or potentially removal.
+     *
+     * @param configuration the configuration for this Session.
+     * @return a reply object wrapping the Connection itself.
+     * @see <a href="https://github.com/real-logic/artio/wiki/ILink-3-Support">
+     *     https://github.com/real-logic/artio/wiki/ILink-3-Support</a>
+     */
+    public Reply<ILink3Connection> initiate(final ILink3ConnectionConfiguration configuration)
+    {
+        return poller.initiate(configuration);
+    }
+
+    /**
+     * Get a list of the currently active ILink3 Sessions.
+     * <p>
+     * Note: the list is unmodifiable.
+     *
+     * @return a list of the currently active ILink3 Sessions
+     */
+    public List<ILink3Connection> iLink3Sessions()
+    {
+        return poller.iLink3Sessions();
+    }
+
+    protected boolean shouldRethrowExceptionInErrorHandler()
+    {
+        return RETHROW_EXCEPTION.get();
+    }
 }

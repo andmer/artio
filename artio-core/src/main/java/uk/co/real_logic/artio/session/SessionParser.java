@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,23 +16,27 @@
 package uk.co.real_logic.artio.session;
 
 import io.aeron.logbuffer.ControlledFragmentHandler.Action;
+import org.agrona.AsciiNumberFormatException;
 import org.agrona.DirectBuffer;
 import org.agrona.ErrorHandler;
-import org.agrona.LangUtil;
 import uk.co.real_logic.artio.FixGatewayException;
 import uk.co.real_logic.artio.builder.Decoder;
 import uk.co.real_logic.artio.decoder.*;
+import uk.co.real_logic.artio.dictionary.FixDictionary;
+import uk.co.real_logic.artio.dictionary.SessionConstants;
+import uk.co.real_logic.artio.fields.RejectReason;
 import uk.co.real_logic.artio.fields.UtcTimestampDecoder;
+import uk.co.real_logic.artio.library.OnMessageInfo;
 import uk.co.real_logic.artio.messages.SessionState;
 import uk.co.real_logic.artio.util.AsciiBuffer;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 import uk.co.real_logic.artio.validation.MessageValidationStrategy;
 
-import java.util.stream.Stream;
-
+import static io.aeron.logbuffer.ControlledFragmentHandler.Action.ABORT;
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
 import static uk.co.real_logic.artio.builder.Validation.CODEC_VALIDATION_ENABLED;
 import static uk.co.real_logic.artio.builder.Validation.isValidMsgType;
+import static uk.co.real_logic.artio.dictionary.SessionConstants.*;
 import static uk.co.real_logic.artio.dictionary.generation.CodecUtil.MISSING_INT;
 import static uk.co.real_logic.artio.dictionary.generation.CodecUtil.MISSING_LONG;
 import static uk.co.real_logic.artio.messages.SessionState.AWAITING_LOGOUT;
@@ -41,111 +45,210 @@ import static uk.co.real_logic.artio.session.Session.UNKNOWN;
 
 public class SessionParser
 {
-    private static final boolean HAS_USER_NAME_AND_PASSWORD = detectUsernameAndPassword();
-
     private final AsciiBuffer asciiBuffer = new MutableAsciiBuffer();
-    private final UtcTimestampDecoder timestampDecoder = new UtcTimestampDecoder();
-    private final LogonDecoder logon = new LogonDecoder();
-    private final LogoutDecoder logout = new LogoutDecoder();
-    private final RejectDecoder reject = new RejectDecoder();
-    private final TestRequestDecoder testRequest = new TestRequestDecoder();
-    private final HeaderDecoder header = new HeaderDecoder();
-    private final SequenceResetDecoder sequenceReset = new SequenceResetDecoder();
-    private final HeartbeatDecoder heartbeat = new HeartbeatDecoder();
+    private final UtcTimestampDecoder timestampDecoder;
 
-    // TODO: optimisation candidate to just move to copying bytes.
-    private byte[] msgTypeBuffer = new byte[2];
+    private AbstractLogonDecoder logon;
+    private AbstractLogoutDecoder logout;
+    private AbstractRejectDecoder reject;
+    private AbstractTestRequestDecoder testRequest;
+    private SessionHeaderDecoder header;
+    private AbstractSequenceResetDecoder sequenceReset;
+    private AbstractResendRequestDecoder resendRequest;
+    private AbstractHeartbeatDecoder heartbeat;
+
+    private final boolean validateCompIdsOnEveryMessage;
+    private final OnMessageInfo messageInfo;
+    private final SessionIdStrategy sessionIdStrategy;
 
     private final Session session;
-    private final SessionIdStrategy sessionIdStrategy;
     private final MessageValidationStrategy validationStrategy;
-    private ErrorHandler errorHandler;
+    private final ErrorHandler errorHandler;
+    private CompositeKey compositeKey;
 
     public SessionParser(
         final Session session,
-        final SessionIdStrategy sessionIdStrategy,
         final MessageValidationStrategy validationStrategy,
-        final ErrorHandler errorHandler) // nullable
+        final ErrorHandler errorHandler,
+        final boolean validateCompIdsOnEveryMessage,
+        final boolean validateTimeStrictly,
+        final OnMessageInfo messageInfo,
+        final SessionIdStrategy sessionIdStrategy)
     {
         this.session = session;
-        this.sessionIdStrategy = sessionIdStrategy;
         this.validationStrategy = validationStrategy;
         this.errorHandler = errorHandler;
+        this.validateCompIdsOnEveryMessage = validateCompIdsOnEveryMessage;
+        this.messageInfo = messageInfo;
+        this.sessionIdStrategy = sessionIdStrategy;
+        this.timestampDecoder = new UtcTimestampDecoder(validateTimeStrictly);
     }
 
-    public static String username(final LogonDecoder logon)
+    public void fixDictionary(final FixDictionary fixDictionary)
     {
-        return HAS_USER_NAME_AND_PASSWORD ? logon.usernameAsString() : null;
+        logon = fixDictionary.makeLogonDecoder();
+        logout = fixDictionary.makeLogoutDecoder();
+        reject = fixDictionary.makeRejectDecoder();
+        testRequest = fixDictionary.makeTestRequestDecoder();
+        header = fixDictionary.makeHeaderDecoder();
+        sequenceReset = fixDictionary.makeSequenceResetDecoder();
+        heartbeat = fixDictionary.makeHeartbeatDecoder();
+        resendRequest = fixDictionary.makeResendRequestDecoder();
     }
 
-    public static String password(final LogonDecoder logon)
+    public static String username(final AbstractLogonDecoder logon)
     {
-        return HAS_USER_NAME_AND_PASSWORD ? logon.passwordAsString() : null;
+        return logon.supportsUsername() ? logon.usernameAsString() : null;
     }
 
-    private static boolean detectUsernameAndPassword()
+    public static String password(final AbstractLogonDecoder logon)
     {
-        return Stream
-            .of(LogonDecoder.class.getMethods())
-            .anyMatch((method) -> "usernameAsString".equals(method.getName()));
+        return logon.supportsPassword() ? logon.passwordAsString() : null;
     }
 
     public Action onMessage(
         final DirectBuffer buffer,
         final int offset,
         final int length,
-        final int messageType,
-        final long sessionId)
+        final long messageType,
+        final long position)
     {
         asciiBuffer.wrap(buffer);
 
-        Action action = null;
+        final Action action;
 
-        switch (messageType)
+        try
         {
-            case LogonDecoder.MESSAGE_TYPE:
-                action = onLogon(offset, length);
-                break;
+            if (messageType == LOGON_MESSAGE_TYPE)
+            {
+                action = onLogon(offset, length, position);
+            }
+            else if (messageType == LOGOUT_MESSAGE_TYPE)
+            {
+                action = onLogout(offset, length, position);
+            }
+            else if (messageType == HEARTBEAT_MESSAGE_TYPE)
+            {
+                action = onHeartbeat(offset, length, position);
+            }
+            else if (messageType == REJECT_MESSAGE_TYPE)
+            {
+                action = onReject(offset, length, position);
+            }
+            else if (messageType == TEST_REQUEST_MESSAGE_TYPE)
+            {
+                action = onTestRequest(offset, length, position);
+            }
+            else if (messageType == SEQUENCE_RESET_MESSAGE_TYPE)
+            {
+                action = onSequenceReset(offset, length, position);
+            }
+            else if (messageType == RESEND_REQUEST_MESSAGE_TYPE)
+            {
+                action = onResendRequest(offset, length, position);
+            }
+            else
+            {
+                action = onAnyOtherMessage(offset, length, position);
+            }
 
-            case LogoutDecoder.MESSAGE_TYPE:
-                action = onLogout(offset, length);
-                break;
+            // Consider admin messages processed when they've been received by the session logic
+            session.updateLastMessageProcessed();
 
-            case HeartbeatDecoder.MESSAGE_TYPE:
-                action = onHeartbeat(offset, length);
-                break;
+            return action;
+        }
+        catch (final MalformedTagFormatException e)
+        {
+            return rejectAndHandleExceptionalMessage(e, messageType, e.refTagId(), position);
+        }
+        catch (final AsciiNumberFormatException e)
+        {
+            // We should just ignore the message when the first three fields are out of order.
+            if (e.getMessage().contains("'^' is not a valid digit"))
+            {
+                return CONTINUE;
+            }
+            else
+            {
+                return rejectAndHandleExceptionalMessage(e, messageType, MISSING_INT, position);
+            }
+        }
+        catch (final Exception e)
+        {
+            return rejectAndHandleExceptionalMessage(e, messageType, MISSING_INT, position);
+        }
+    }
 
-            case RejectDecoder.MESSAGE_TYPE:
-                action = onReject(offset, length);
-                break;
+    private Action rejectAndHandleExceptionalMessage(final Exception e, final long messageType, final int refTagId,
+        final long position)
+    {
+        final Action action = rejectExceptionalMessage(messageType, refTagId, position);
 
-            case TestRequestDecoder.MESSAGE_TYPE:
-                action = onTestRequest(offset, length);
-                break;
-
-            case SequenceResetDecoder.MESSAGE_TYPE:
-                action = onSequenceReset(offset, length);
-                break;
-
-            default:
-                return onAnyOtherMessage(offset, length);
+        if (action == CONTINUE)
+        {
+            onError(e);
         }
 
-        // Consider admin messages processed when they've been received by the session logic
-        session.updateLastMessageProcessed();
         return action;
     }
 
-    private Action onHeartbeat(final int offset, final int length)
+    private Action rejectExceptionalMessage(final long messageType, final int refTagId, final long position)
     {
-        final HeartbeatDecoder heartbeat = this.heartbeat;
+        if (messageType == LOGON_MESSAGE_TYPE)
+        {
+            final Action action = onExceptionalMessage(logon.header(), refTagId, position);
+            if (action != ABORT)
+            {
+                session.logoutAndDisconnect();
+            }
+            return action;
+        }
+        else if (messageType == LOGOUT_MESSAGE_TYPE)
+        {
+            return onExceptionalMessage(logout.header(), refTagId, position);
+        }
+        else if (messageType == HEARTBEAT_MESSAGE_TYPE)
+        {
+            return onExceptionalMessage(heartbeat.header(), refTagId, position);
+        }
+        else if (messageType == REJECT_MESSAGE_TYPE)
+        {
+            return onExceptionalMessage(reject.header(), refTagId, position);
+        }
+        else if (messageType == TEST_REQUEST_MESSAGE_TYPE)
+        {
+            return onExceptionalMessage(testRequest.header(), refTagId, position);
+        }
+        else if (messageType == SEQUENCE_RESET_MESSAGE_TYPE)
+        {
+            return onExceptionalMessage(sequenceReset.header(), refTagId, position);
+        }
+        return onExceptionalMessage(header, refTagId, position);
+    }
+
+    private Action onExceptionalMessage(final SessionHeaderDecoder header, final int regTagId, final long position)
+    {
+        final int msgSeqNum = header.msgSeqNum();
+
+        return session.onInvalidMessage(
+            msgSeqNum,
+            regTagId,
+            header.msgType(),
+            header.msgTypeLength(),
+            SessionConstants.INCORRECT_DATA_FORMAT_FOR_VALUE,
+            position);
+    }
+
+    private Action onHeartbeat(final int offset, final int length, final long position)
+    {
+        final AbstractHeartbeatDecoder heartbeat = this.heartbeat;
 
         heartbeat.reset();
         heartbeat.decode(asciiBuffer, offset, length);
-        final HeaderDecoder header = heartbeat.header();
-        if (CODEC_VALIDATION_ENABLED && (!heartbeat.validate() || !validateHeader(header)))
+        final SessionHeaderDecoder header = heartbeat.header();
+        if (CODEC_VALIDATION_ENABLED && (!heartbeat.validate() || !validateHeader(header, position)))
         {
-            return onCodecInvalidMessage(heartbeat, header, false);
+            return onCodecInvalidMessage(heartbeat, header, false, position);
         }
         else if (heartbeat.hasTestReqID())
         {
@@ -163,52 +266,64 @@ public class SessionParser
                 sendingTime,
                 origSendingTime,
                 isPossDupOrResend(possDup, header),
-                possDup);
+                possDup,
+                position);
         }
         else
         {
-            return onMessage(header);
+            return onMessage(header, position);
         }
     }
 
-    private long sendingTime(final HeaderDecoder header)
+    private long sendingTime(final SessionHeaderDecoder header)
     {
         final byte[] sendingTime = header.sendingTime();
-        return decodeTimestamp(sendingTime);
+        return decodeTimestamp(sendingTime, header.sendingTimeLength(), SENDING_TIME);
     }
 
-    private long decodeTimestamp(final byte[] sendingTime)
+    private long decodeTimestamp(final byte[] sendingTime, final int length, final int refTagId)
     {
-        return CODEC_VALIDATION_ENABLED ?
-            timestampDecoder.decode(sendingTime, sendingTime.length) :
-            MISSING_LONG;
+        try
+        {
+            return CODEC_VALIDATION_ENABLED ?
+                timestampDecoder.decode(sendingTime, length) :
+                MISSING_LONG;
+        }
+        catch (final Exception e)
+        {
+            throw new MalformedTagFormatException(refTagId, e);
+        }
     }
 
-    private Action onAnyOtherMessage(final int offset, final int length)
+    private Action onAnyOtherMessage(final int offset, final int length, final long position)
     {
-        final HeaderDecoder header = this.header;
+        final SessionHeaderDecoder header = this.header;
         header.reset();
         header.decode(asciiBuffer, offset, length);
 
         final char[] msgType = header.msgType();
         final int msgTypeLength = header.msgTypeLength();
-        if (CODEC_VALIDATION_ENABLED && (!isValidMsgType(msgType, msgTypeLength) || !validateHeader(header)))
+        if (CODEC_VALIDATION_ENABLED && (!isValidMsgType(msgType, msgTypeLength) || !validateHeader(header, position)))
         {
             final int msgSeqNum = header.msgSeqNum();
             if (!isDisconnectedOrAwaitingLogout())
             {
-                return session.onInvalidMessageType(msgSeqNum, msgType, msgTypeLength);
+                return session.onInvalidMessageType(msgSeqNum, msgType, msgTypeLength, position);
+            }
+            else
+            {
+                messageInfo.isValid(false);
             }
         }
         else
         {
-            return onMessage(header);
+            return onMessage(header, position);
         }
 
         return CONTINUE;
     }
 
-    private Action onMessage(final HeaderDecoder header)
+    private Action onMessage(final SessionHeaderDecoder header, final long position)
     {
         final long origSendingTime = origSendingTime(header);
         final long sendingTime = sendingTime(header);
@@ -220,24 +335,62 @@ public class SessionParser
             sendingTime,
             origSendingTime,
             isPossDupOrResend(possDup, header),
-            possDup);
+            possDup,
+            position);
     }
 
-    private long origSendingTime(final HeaderDecoder header)
+    private long origSendingTime(final SessionHeaderDecoder header)
     {
-        return header.hasOrigSendingTime() ? decodeTimestamp(header.origSendingTime()) : UNKNOWN;
+        if (header.hasOrigSendingTime())
+        {
+            return decodeTimestamp(header.origSendingTime(), header.origSendingTimeLength(), ORIG_SENDING_TIME);
+        }
+        return UNKNOWN;
     }
 
-    private Action onSequenceReset(final int offset, final int length)
+    private Action onResendRequest(final int offset, final int length, final long position)
     {
-        final SequenceResetDecoder sequenceReset = this.sequenceReset;
+        final AbstractResendRequestDecoder resendRequest = this.resendRequest;
+
+        resendRequest.reset();
+        resendRequest.decode(asciiBuffer, offset, length);
+        final SessionHeaderDecoder header = resendRequest.header();
+        if (CODEC_VALIDATION_ENABLED && (!resendRequest.validate() || !validateHeader(header, position)))
+        {
+            return onCodecInvalidMessage(resendRequest, header, false, position);
+        }
+        else
+        {
+            final long origSendingTime = origSendingTime(header);
+            final long sendingTime = sendingTime(header);
+            final int beginSeqNo = resendRequest.beginSeqNo();
+            final int endSeqNo = resendRequest.endSeqNo();
+            final boolean possDup = isPossDup(header);
+            return session.onResendRequest(
+                header.msgSeqNum(),
+                beginSeqNo,
+                endSeqNo,
+                isPossDupOrResend(possDup, header),
+                possDup,
+                sendingTime,
+                origSendingTime,
+                position,
+                asciiBuffer,
+                offset,
+                length);
+        }
+    }
+
+    private Action onSequenceReset(final int offset, final int length, final long position)
+    {
+        final AbstractSequenceResetDecoder sequenceReset = this.sequenceReset;
 
         sequenceReset.reset();
         sequenceReset.decode(asciiBuffer, offset, length);
-        final HeaderDecoder header = sequenceReset.header();
-        if (CODEC_VALIDATION_ENABLED && (!sequenceReset.validate() || !validateHeader(header)))
+        final SessionHeaderDecoder header = sequenceReset.header();
+        if (CODEC_VALIDATION_ENABLED && (!sequenceReset.validate() || !validateHeader(header, position)))
         {
-            return onCodecInvalidMessage(sequenceReset, header, false);
+            return onCodecInvalidMessage(sequenceReset, header, false, position);
         }
         else
         {
@@ -247,21 +400,21 @@ public class SessionParser
                 header.msgSeqNum(),
                 sequenceReset.newSeqNo(),
                 gapFillFlag,
-                isPossDupOrResend(possDup, header)
-            );
+                isPossDupOrResend(possDup, header),
+                position);
         }
     }
 
-    private Action onTestRequest(final int offset, final int length)
+    private Action onTestRequest(final int offset, final int length, final long position)
     {
-        final TestRequestDecoder testRequest = this.testRequest;
+        final AbstractTestRequestDecoder testRequest = this.testRequest;
 
         testRequest.reset();
         testRequest.decode(asciiBuffer, offset, length);
-        final HeaderDecoder header = testRequest.header();
-        if (CODEC_VALIDATION_ENABLED && (!testRequest.validate() || !validateHeader(header)))
+        final SessionHeaderDecoder header = testRequest.header();
+        if (CODEC_VALIDATION_ENABLED && (!testRequest.validate() || !validateHeader(header, position)))
         {
-            return onCodecInvalidMessage(testRequest, header, false);
+            return onCodecInvalidMessage(testRequest, header, false, position);
         }
         else
         {
@@ -276,20 +429,20 @@ public class SessionParser
                 sendingTime,
                 origSendingTime,
                 isPossDupOrResend(possDup, header),
-                possDup);
+                possDup, position);
         }
     }
 
-    private Action onReject(final int offset, final int length)
+    private Action onReject(final int offset, final int length, final long position)
     {
-        final RejectDecoder reject = this.reject;
+        final AbstractRejectDecoder reject = this.reject;
 
         reject.reset();
         reject.decode(asciiBuffer, offset, length);
-        final HeaderDecoder header = reject.header();
-        if (CODEC_VALIDATION_ENABLED && (!reject.validate() || !validateHeader(header)))
+        final SessionHeaderDecoder header = reject.header();
+        if (CODEC_VALIDATION_ENABLED && (!reject.validate() || !validateHeader(header, position)))
         {
-            return onCodecInvalidMessage(reject, header, false);
+            return onCodecInvalidMessage(reject, header, false, position);
         }
         else
         {
@@ -301,20 +454,21 @@ public class SessionParser
                 sendingTime,
                 origSendingTime,
                 isPossDupOrResend(possDup, header),
-                possDup);
+                possDup,
+                position);
         }
     }
 
-    private Action onLogout(final int offset, final int length)
+    private Action onLogout(final int offset, final int length, final long position)
     {
-        final LogoutDecoder logout = this.logout;
+        final AbstractLogoutDecoder logout = this.logout;
 
         logout.reset();
         logout.decode(asciiBuffer, offset, length);
-        final HeaderDecoder header = logout.header();
-        if (CODEC_VALIDATION_ENABLED && (!logout.validate() || !validateHeader(header)))
+        final SessionHeaderDecoder header = logout.header();
+        if (CODEC_VALIDATION_ENABLED && (!logout.validate() || !validateHeader(header, position)))
         {
-            return onCodecInvalidMessage(logout, header, false);
+            return onCodecInvalidMessage(logout, header, false, position);
         }
         else
         {
@@ -325,24 +479,25 @@ public class SessionParser
                 header.msgSeqNum(),
                 sendingTime,
                 origSendingTime,
-                possDup);
+                possDup,
+                position);
         }
     }
 
-    private Action onLogon(final int offset, final int length)
+    private Action onLogon(final int offset, final int length, final long position)
     {
-        final LogonDecoder logon = this.logon;
+        final AbstractLogonDecoder logon = this.logon;
         final Session session = this.session;
 
         logon.reset();
         logon.decode(asciiBuffer, offset, length);
-        final HeaderDecoder header = logon.header();
+        final SessionHeaderDecoder header = logon.header();
         final char[] beginString = header.beginString();
         final int beginStringLength = header.beginStringLength();
         if (CODEC_VALIDATION_ENABLED &&
             (!logon.validate() || !session.onBeginString(beginString, beginStringLength, true)))
         {
-            return onCodecInvalidMessage(logon, header, true);
+            return onCodecInvalidMessage(logon, header, true, position);
         }
         else
         {
@@ -360,7 +515,8 @@ public class SessionParser
                 password,
                 isPossDupOrResend(possDup, header),
                 resetSeqNumFlag(logon),
-                possDup);
+                possDup,
+                position);
         }
     }
 
@@ -377,50 +533,61 @@ public class SessionParser
 
     private void onError(final Throwable throwable)
     {
-        // Library code should throw the exception to make users aware of it
-        // Engine code should log it through the normal error handling process.
-        if (errorHandler == null)
-        {
-            LangUtil.rethrowUnchecked(throwable);
-        }
-        else
-        {
-            errorHandler.onError(throwable);
-        }
+        errorHandler.onError(throwable);
     }
 
-    private boolean resetSeqNumFlag(final LogonDecoder logon)
+    private boolean resetSeqNumFlag(final AbstractLogonDecoder logon)
     {
         return logon.hasResetSeqNumFlag() && logon.resetSeqNumFlag();
     }
 
-    private boolean validateHeader(final HeaderDecoder header)
+    private boolean validateHeader(final SessionHeaderDecoder header, final long position)
     {
+        // Validate begin string
         if (!session.onBeginString(header.beginString(), header.beginStringLength(), false))
         {
             return false;
         }
 
-        boolean validated;
-        try
+        boolean validated = true;
+        int rejectReason = RejectReason.OTHER.representation();
+
+        int invalidTagId = validateCompIds(header);
+        if (invalidTagId != 0)
         {
-            validated = validationStrategy.validate(header);
-        }
-        catch (final Throwable throwable)
-        {
-            onStrategyError("validation", throwable, header.toString());
             validated = false;
+            rejectReason = RejectReason.COMPID_PROBLEM.representation();
+        }
+
+        // Apply validation strategy
+        if (validated)
+        {
+            try
+            {
+                validated = validationStrategy.validate(header);
+                if (!validated)
+                {
+                    rejectReason = validationStrategy.rejectReason();
+                    invalidTagId = validationStrategy.invalidTagId();
+                }
+            }
+            catch (final Throwable throwable)
+            {
+                onStrategyError("validation", throwable, header.toString());
+                validated = false;
+            }
         }
 
         if (!validated)
         {
             session.onInvalidMessage(
                 header.msgSeqNum(),
-                validationStrategy.invalidTagId(),
+                invalidTagId,
                 header.msgType(),
                 header.msgTypeLength(),
-                validationStrategy.rejectReason());
-            session.logoutRejectReason(validationStrategy.rejectReason());
+                rejectReason,
+                position);
+            session.logoutRejectReason(rejectReason);
             session.startLogout();
             return false;
         }
@@ -428,10 +595,22 @@ public class SessionParser
         return true;
     }
 
+    private int validateCompIds(final SessionHeaderDecoder header)
+    {
+        if (!validateCompIdsOnEveryMessage)
+        {
+            return 0;
+        }
+
+        // Case can happen when switching control of the Session between Library and Engine.
+        return sessionIdStrategy.validateCompIds(compositeKey, header);
+    }
+
     private Action onCodecInvalidMessage(
         final Decoder decoder,
-        final HeaderDecoder header,
-        final boolean requestDisconnect)
+        final SessionHeaderDecoder header,
+        final boolean requestDisconnect,
+        final long position)
     {
         if (!isDisconnectedOrAwaitingLogout())
         {
@@ -443,7 +622,7 @@ public class SessionParser
                 final long sendingTime = sendingTime(header);
                 final char[] msgType = header.msgType();
                 return session.onMessage(MISSING_INT, msgType, msgTypeLength, sendingTime, origSendingTime, false,
-                    false);
+                    false, position);
             }
 
             final Action action = session.onInvalidMessage(
@@ -451,7 +630,8 @@ public class SessionParser
                 decoder.invalidTagId(),
                 header.msgType(),
                 msgTypeLength,
-                decoder.rejectReason());
+                decoder.rejectReason(),
+                position);
 
             if (action == CONTINUE && requestDisconnect)
             {
@@ -459,6 +639,10 @@ public class SessionParser
             }
 
             return action;
+        }
+        else
+        {
+            messageInfo.isValid(false);
         }
 
         if (requestDisconnect)
@@ -475,12 +659,12 @@ public class SessionParser
         return state == DISCONNECTED || state == AWAITING_LOGOUT;
     }
 
-    private boolean isPossDupOrResend(final boolean possDup, final HeaderDecoder header)
+    private boolean isPossDupOrResend(final boolean possDup, final SessionHeaderDecoder header)
     {
         return possDup || (header.hasPossResend() && header.possResend());
     }
 
-    private boolean isPossDup(final HeaderDecoder header)
+    private boolean isPossDup(final SessionHeaderDecoder header)
     {
         return header.hasPossDupFlag() && header.possDupFlag();
     }
@@ -493,5 +677,10 @@ public class SessionParser
     public void sequenceIndex(final int sequenceIndex)
     {
         session.sequenceIndex(sequenceIndex);
+    }
+
+    public void sessionKey(final CompositeKey sessionKey)
+    {
+        this.compositeKey = sessionKey;
     }
 }

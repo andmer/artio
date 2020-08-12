@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ import org.junit.Before;
 import org.junit.Test;
 import uk.co.real_logic.artio.FixGatewayException;
 import uk.co.real_logic.artio.Reply;
+import uk.co.real_logic.artio.engine.EngineConfiguration;
 import uk.co.real_logic.artio.engine.FixEngine;
 import uk.co.real_logic.artio.library.FixLibrary;
 import uk.co.real_logic.artio.library.LibraryConfiguration;
@@ -30,8 +31,10 @@ import uk.co.real_logic.artio.session.Session;
 import java.io.File;
 
 import static java.util.Collections.singletonList;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.instanceOf;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 import static uk.co.real_logic.artio.Reply.State.ERRORED;
 import static uk.co.real_logic.artio.Reply.State.TIMED_OUT;
 import static uk.co.real_logic.artio.TestFixtures.*;
@@ -40,14 +43,14 @@ import static uk.co.real_logic.artio.system_tests.SystemTestUtil.*;
 
 public class LibraryAndGatewayRandomTimeoutTest
 {
-    private int aeronPort = unusedPort();
-    private int port = unusedPort();
+    private final int aeronPort = unusedPort();
+    private final int port = unusedPort();
     private ArchivingMediaDriver mediaDriver;
     private FixEngine initiatingEngine;
     private FixLibrary initiatingLibrary;
 
-    private FakeOtfAcceptor initiatingOtfAcceptor = new FakeOtfAcceptor();
-    private FakeHandler initiatingSessionHandler = new FakeHandler(initiatingOtfAcceptor);
+    private final FakeOtfAcceptor initiatingOtfAcceptor = new FakeOtfAcceptor();
+    private final FakeHandler initiatingSessionHandler = new FakeHandler(initiatingOtfAcceptor);
 
     @Before
     public void launch()
@@ -106,6 +109,9 @@ public class LibraryAndGatewayRandomTimeoutTest
 
     private void launchEngine()
     {
-        initiatingEngine = launchInitiatingEngine(aeronPort);
+        final EngineConfiguration initiatingConfig = initiatingConfig(aeronPort);
+        initiatingConfig.printErrorMessages(false);
+        initiatingConfig.deleteLogFileDirOnStart(true);
+        initiatingEngine = FixEngine.launch(initiatingConfig);
     }
 }

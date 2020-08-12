@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,8 +18,11 @@ package uk.co.real_logic.artio.session;
 import io.aeron.logbuffer.ControlledFragmentHandler.Action;
 import org.agrona.concurrent.EpochClock;
 import org.agrona.concurrent.status.AtomicCounter;
+import uk.co.real_logic.artio.Clock;
+import uk.co.real_logic.artio.library.OnMessageInfo;
 import uk.co.real_logic.artio.messages.SessionState;
 import uk.co.real_logic.artio.protocol.GatewayPublication;
+import uk.co.real_logic.artio.util.EpochFractionClock;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
 public class InitiatorSession extends InternalSession
@@ -29,9 +32,11 @@ public class InitiatorSession extends InternalSession
     public InitiatorSession(
         final int heartbeatInterval,
         final long connectionId,
-        final EpochClock clock,
+        final EpochClock epochClock,
+        final Clock clock,
         final SessionProxy proxy,
-        final GatewayPublication publication,
+        final GatewayPublication inboundPublication,
+        final GatewayPublication outboundPublication,
         final SessionIdStrategy sessionIdStrategy,
         final long sendingTimeWindow,
         final AtomicCounter receivedMsgSeqNo,
@@ -43,15 +48,20 @@ public class InitiatorSession extends InternalSession
         final boolean resetSeqNum,
         final long reasonableTransmissionTimeInMs,
         final MutableAsciiBuffer asciiBuffer,
-        final boolean enableLastMsgSeqNumProcessed)
+        final boolean enableLastMsgSeqNumProcessed,
+        final SessionCustomisationStrategy customisationStrategy,
+        final OnMessageInfo messageInfo,
+        final EpochFractionClock epochFractionClock)
     {
         super(
             heartbeatInterval,
             connectionId,
+            epochClock,
             clock,
             state,
             proxy,
-            publication,
+            inboundPublication,
+            outboundPublication,
             sessionIdStrategy,
             sendingTimeWindow,
             receivedMsgSeqNo,
@@ -61,7 +71,10 @@ public class InitiatorSession extends InternalSession
             sequenceIndex,
             reasonableTransmissionTimeInMs,
             asciiBuffer,
-            enableLastMsgSeqNumProcessed);
+            enableLastMsgSeqNumProcessed,
+            customisationStrategy,
+            messageInfo,
+            epochFractionClock);
         this.resetSeqNum = resetSeqNum;
     }
 
@@ -84,8 +97,7 @@ public class InitiatorSession extends InternalSession
             state(SessionState.SENT_LOGON);
             final int heartbeatIntervalInS = (int)(heartbeatIntervalInMs() / 1000);
             final int sentSeqNum = resetSeqNum ? 1 : newSentSeqNum();
-            final long position = proxy.logon(heartbeatIntervalInS,
-                sentSeqNum,
+            final long position = proxy.sendLogon(sentSeqNum, heartbeatIntervalInS,
                 username(),
                 password(),
                 resetSeqNum,

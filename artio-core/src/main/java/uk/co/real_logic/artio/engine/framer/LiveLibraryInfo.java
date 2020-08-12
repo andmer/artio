@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,8 +15,9 @@
  */
 package uk.co.real_logic.artio.engine.framer;
 
+import org.agrona.collections.Long2ObjectHashMap;
 import uk.co.real_logic.artio.LivenessDetector;
-import uk.co.real_logic.artio.engine.SessionInfo;
+import uk.co.real_logic.artio.engine.ConnectedSessionInfo;
 import uk.co.real_logic.artio.engine.framer.SubscriptionSlowPeeker.LibrarySlowPeeker;
 
 import java.util.List;
@@ -32,7 +33,9 @@ final class LiveLibraryInfo implements LibraryInfo
     private final int aeronSessionId;
     private final LibrarySlowPeeker librarySlowPeeker;
     private final List<GatewaySession> allSessions = new CopyOnWriteArrayList<>();
-    private final List<SessionInfo> unmodifiableAllSessions = unmodifiableList(allSessions);
+    private final List<ConnectedSessionInfo> unmodifiableAllSessions = unmodifiableList(allSessions);
+    private final Long2ObjectHashMap<ConnectingSession> correlationIdToConnectingSession = new Long2ObjectHashMap<>();
+
     private long acquireAtPosition;
 
     LiveLibraryInfo(
@@ -59,7 +62,7 @@ final class LiveLibraryInfo implements LibraryInfo
         return libraryName;
     }
 
-    public List<SessionInfo> sessions()
+    public List<ConnectedSessionInfo> sessions()
     {
         return unmodifiableAllSessions;
     }
@@ -102,9 +105,39 @@ final class LiveLibraryInfo implements LibraryInfo
         allSessions.add(session);
     }
 
-    GatewaySession removeSession(final long connectionId)
+    void removeSessionByConnectionId(final long connectionId)
     {
-        return GatewaySessions.removeSessionByConnectionId(connectionId, allSessions);
+        GatewaySessions.removeSessionByConnectionId(connectionId, allSessions);
+    }
+
+    void offlineSession(final long connectionId)
+    {
+        final List<GatewaySession> sessions = this.allSessions;
+        for (int i = 0, size = sessions.size(); i < size; i++)
+        {
+            final GatewaySession session = sessions.get(i);
+            if (session.connectionId() == connectionId)
+            {
+                session.goOffline();
+            }
+        }
+    }
+
+    GatewaySession removeSessionBySessionId(final long sessionId)
+    {
+        final int index = GatewaySessions.indexBySessionId(sessionId, allSessions);
+        return index == -1 ? null : allSessions.remove(index);
+    }
+
+    GatewaySession lookupSessionById(final long sessionId)
+    {
+        final int index = GatewaySessions.indexBySessionId(sessionId, allSessions);
+        return index == -1 ? null : allSessions.get(index);
+    }
+
+    public void removeSession(final GatewaySession gatewaySession)
+    {
+        allSessions.remove(gatewaySession);
     }
 
     void acquireAtPosition(final long libraryPosition)
@@ -146,5 +179,15 @@ final class LiveLibraryInfo implements LibraryInfo
     void releaseSlowPeeker()
     {
         librarySlowPeeker.removeLibrary();
+    }
+
+    void connectionStartsConnecting(final long correlationId, final ConnectingSession connectingSession)
+    {
+        correlationIdToConnectingSession.put(correlationId, connectingSession);
+    }
+
+    ConnectingSession connectionFinishesConnecting(final long correlationId)
+    {
+        return correlationIdToConnectingSession.remove(correlationId);
     }
 }

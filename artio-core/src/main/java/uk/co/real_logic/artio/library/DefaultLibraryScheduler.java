@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,7 +24,6 @@ import org.agrona.concurrent.CompositeAgent;
 import uk.co.real_logic.artio.engine.EngineScheduler;
 
 import static org.agrona.concurrent.AgentRunner.startOnThread;
-import static uk.co.real_logic.artio.CommonConfiguration.backoffIdleStrategy;
 
 public class DefaultLibraryScheduler implements LibraryScheduler
 {
@@ -44,11 +43,18 @@ public class DefaultLibraryScheduler implements LibraryScheduler
         if (monitoringAgent != null)
         {
             monitoringRunner = new AgentRunner(
-                backoffIdleStrategy(),
+                configuration.monitoringThreadIdleStrategy(),
                 errorHandler,
                 null,
-                new CompositeAgent(monitoringAgent, conductorAgent));
-            startOnThread(monitoringRunner);
+                new CompositeAgent(monitoringAgent, conductorAgent)
+                {
+                    public void onStart()
+                    {
+                        FixLibrary.setClientConductorThread();
+                        super.onStart();
+                    }
+                });
+            startOnThread(monitoringRunner, configuration.threadFactory());
         }
     }
 

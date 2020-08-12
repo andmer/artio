@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,7 @@ package uk.co.real_logic.artio;
 import org.agrona.concurrent.UnsafeBuffer;
 import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.infra.Blackhole;
-import uk.co.real_logic.artio.dictionary.IntDictionary;
+import uk.co.real_logic.artio.dictionary.LongDictionary;
 import uk.co.real_logic.artio.otf.OtfParser;
 
 import java.util.concurrent.TimeUnit;
@@ -32,7 +32,7 @@ import java.util.concurrent.TimeUnit;
 public class OtfParserBenchmark
 {
     // Deliberately not static/final
-    private UnsafeBuffer buffer = TestData.NEW_ORDER_SINGLE;
+    private final UnsafeBuffer buffer = TestData.NEW_ORDER_SINGLE;
 
     private OtfParser blackholeParser;
     private OtfParser noBlackholeParser;
@@ -41,9 +41,9 @@ public class OtfParserBenchmark
     @Setup
     public void setup(final Blackhole bh)
     {
-        blackholeParser = new OtfParser(new OtfBlackHoleAcceptor(bh), new IntDictionary());
-        noBlackholeParser = new OtfParser(new OtfNoBlackHoleAcceptor(), new IntDictionary());
-        inlinableParser = new OtfParser(new OtfInlineableAcceptor(), new IntDictionary());
+        blackholeParser = new OtfParser(new OtfBlackHoleAcceptor(bh), new LongDictionary());
+        noBlackholeParser = new OtfParser(new OtfNoBlackHoleAcceptor(), new LongDictionary());
+        inlinableParser = new OtfParser(new OtfInlineableAcceptor(), new LongDictionary());
     }
 
     @Benchmark

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,16 +16,14 @@
 package uk.co.real_logic.artio.system_tests;
 
 import io.aeron.archive.ArchivingMediaDriver;
+import org.agrona.collections.IntArrayList;
 import org.junit.After;
 import org.junit.Test;
 import uk.co.real_logic.artio.Timing;
 import uk.co.real_logic.artio.builder.Encoder;
 import uk.co.real_logic.artio.builder.LogonEncoder;
 import uk.co.real_logic.artio.builder.TestRequestEncoder;
-import uk.co.real_logic.artio.engine.EngineConfiguration;
-import uk.co.real_logic.artio.engine.FixEngine;
-import uk.co.real_logic.artio.engine.LockStepFramerEngineScheduler;
-import uk.co.real_logic.artio.engine.SessionInfo;
+import uk.co.real_logic.artio.engine.*;
 import uk.co.real_logic.artio.engine.framer.LibraryInfo;
 import uk.co.real_logic.artio.fields.UtcTimestampEncoder;
 import uk.co.real_logic.artio.library.FixLibrary;
@@ -41,6 +39,7 @@ import java.nio.channels.SocketChannel;
 import java.util.List;
 
 import static org.agrona.CloseHelper.close;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.Assert.*;
@@ -51,22 +50,22 @@ import static uk.co.real_logic.artio.system_tests.SystemTestUtil.*;
 
 public class SlowConsumerTest
 {
-    private static final int BUFFER_CAPACITY = 8 * 1024;
+    private static final int BUFFER_CAPACITY = 16 * 1024;
     private static final int TEST_TIMEOUT = 20_000;
 
-    private int port = unusedPort();
+    private final int port = unusedPort();
     private ArchivingMediaDriver mediaDriver;
     private FixEngine engine;
     private FixLibrary library;
-    private FakeOtfAcceptor acceptingOtfAcceptor = new FakeOtfAcceptor();
-    private FakeHandler handler = new FakeHandler(acceptingOtfAcceptor);
+    private final FakeOtfAcceptor acceptingOtfAcceptor = new FakeOtfAcceptor();
+    private final FakeHandler handler = new FakeHandler(acceptingOtfAcceptor);
     private TestSystem testSystem;
 
-    private TestRequestEncoder testRequest = newTestRequest();
-    private LogonEncoder logon = new LogonEncoder();
-    private ByteBuffer byteBuffer = ByteBuffer.allocateDirect(BUFFER_CAPACITY);
-    private MutableAsciiBuffer buffer = new MutableAsciiBuffer(byteBuffer);
-    private LockStepFramerEngineScheduler scheduler = new LockStepFramerEngineScheduler();
+    private final TestRequestEncoder testRequest = newTestRequest();
+    private final LogonEncoder logon = new LogonEncoder();
+    private final ByteBuffer byteBuffer = ByteBuffer.allocateDirect(BUFFER_CAPACITY);
+    private final MutableAsciiBuffer buffer = new MutableAsciiBuffer(byteBuffer);
+    private final LockStepFramerEngineScheduler scheduler = new LockStepFramerEngineScheduler();
     private SocketChannel socket;
     private Session session;
 
@@ -74,27 +73,33 @@ public class SlowConsumerTest
     public void shouldQuarantineThenDisconnectASlowConsumer() throws IOException
     {
         final int senderMaxBytesInBuffer = 8 * 1024;
-        setup(senderMaxBytesInBuffer);
+        setup(senderMaxBytesInBuffer, null);
 
         initiateConnection();
 
         final long sessionId = handler.awaitSessionId(testSystem::poll);
         session = acquireSession(handler, library, sessionId, testSystem);
-        final SessionInfo sessionInfo = getSessionInfo();
+        final ConnectedSessionInfo sessionInfo = getSessionInfo();
 
         while (!socketIsConnected())
         {
             testSystem.poll();
         }
 
-        assertNotSlow(session);
-        // startStepping();
+        assertNotSlow();
+
+        boolean hasBecomeSlow = false;
 
         while (socketIsConnected())
         {
-            if (session.canSendMessage())
+            if (session.isActive())
             {
-                session.send(testRequest);
+                if (handler.isSlow(session))
+                {
+                    hasBecomeSlow = true;
+                }
+
+                session.trySend(testRequest);
             }
 
             testSystem.poll();
@@ -102,14 +107,17 @@ public class SlowConsumerTest
 
         bytesInBufferAtLeast(sessionInfo, senderMaxBytesInBuffer);
 
-        // stopStepping();
+        assertTrue(hasBecomeSlow);
     }
 
     @Test(timeout = TEST_TIMEOUT)
     public void shouldRestoreConnectionFromSlowGroupWhenItCatchesUp() throws IOException
     {
-        final SessionInfo sessionInfo = sessionBecomesSlow();
+        final MessageTimingCaptor messageTimingCaptor = new MessageTimingCaptor();
+        final ConnectedSessionInfo sessionInfo = sessionBecomesSlow(messageTimingCaptor);
         socket.configureBlocking(false);
+
+        testSystem.poll();
 
         // Get out of slow state
         while (sessionInfo.bytesInBuffer() > 0 || handler.isSlow(session))
@@ -122,13 +130,14 @@ public class SlowConsumerTest
             }
             while (bytesRead > 0);
 
-            session.send(testRequest);
+            session.trySend(testRequest);
 
             testSystem.poll();
         }
 
-        assertNotSlow(session);
-        // stopStepping();
+        assertNotSlow();
+
+        messageTimingCaptor.verifyConsecutiveSequenceNumbers(session.lastSentMsgSeqNum());
 
         assertEquals(ACTIVE, session.state());
         assertTrue(socketIsConnected());
@@ -137,52 +146,53 @@ public class SlowConsumerTest
     @Test(timeout = TEST_TIMEOUT)
     public void shouldNotifyLibraryOfSlowConnectionWhenAcquired() throws IOException
     {
-        sessionBecomesSlow();
+        sessionBecomesSlow(null);
 
-        // stopStepping();
-
-        assertEquals(SessionReplyStatus.OK, releaseToGateway(library, session, testSystem));
+        assertEquals(SessionReplyStatus.OK, releaseToEngine(library, session, testSystem));
 
         session = acquireSession(handler, library, session.id(), testSystem);
 
         assertTrue("Session not slow", handler.lastSessionWasSlow());
     }
 
-    private SessionInfo sessionBecomesSlow() throws IOException
+    private ConnectedSessionInfo sessionBecomesSlow(final MessageTimingCaptor messageTimingCaptor) throws IOException
     {
-        setup(DEFAULT_SENDER_MAX_BYTES_IN_BUFFER);
+        setup(DEFAULT_SENDER_MAX_BYTES_IN_BUFFER, messageTimingCaptor);
 
         initiateConnection();
 
         final long sessionId = handler.awaitSessionId(testSystem::poll);
         session = acquireSession(handler, library, sessionId, testSystem);
-        final SessionInfo sessionInfo = getSessionInfo();
+        final ConnectedSessionInfo sessionInfo = getSessionInfo();
 
-        assertNotSlow(session);
-
-        // startStepping();
+        assertNotSlow();
 
         // Get into a slow state
         while (sessionInfo.bytesInBuffer() == 0 || !handler.isSlow(session))
         {
             for (int i = 0; i < 10; i++)
             {
-                session.send(testRequest);
+                session.trySend(testRequest);
             }
 
             testSystem.poll();
         }
 
-        assertTrue(handler.isSlow(session));
+        assertIsSlow();
         return sessionInfo;
     }
 
-    private void assertNotSlow(final Session session)
+    private void assertIsSlow()
+    {
+        assertTrue(handler.isSlow(session));
+    }
+
+    private void assertNotSlow()
     {
         assertFalse(handler.isSlow(session));
     }
 
-    private void bytesInBufferAtLeast(final SessionInfo sessionInfo, final long bytesInBuffer)
+    private void bytesInBufferAtLeast(final ConnectedSessionInfo sessionInfo, final long bytesInBuffer)
     {
         Timing.assertEventuallyTrue("Buffer doesn't have enough bytes in", () ->
         {
@@ -198,12 +208,12 @@ public class SlowConsumerTest
         return testRequest;
     }
 
-    private SessionInfo getSessionInfo()
+    private ConnectedSessionInfo getSessionInfo()
     {
         final List<LibraryInfo> libraries = libraries(engine, testSystem);
         assertThat(libraries, hasSize(2));
         final LibraryInfo libraryInfo = libraries.get(0);
-        final List<SessionInfo> sessions = libraryInfo.sessions();
+        final List<ConnectedSessionInfo> sessions = libraryInfo.sessions();
         assertThat(sessions, hasSize(1));
         return sessions.get(0);
     }
@@ -248,23 +258,46 @@ public class SlowConsumerTest
     @After
     public void cleanup()
     {
+        testSystem.awaitBlocking(() -> close(engine));
         close(library);
-        close(engine);
         cleanupMediaDriver(mediaDriver);
         close(socket);
     }
 
-    private void setup(final int senderMaxBytesInBuffer) throws IOException
+    private void setup(final int senderMaxBytesInBuffer, final MessageTimingCaptor messageTimingCaptor)
     {
         mediaDriver = launchMediaDriver(8 * 1024 * 1024);
-        delete(ACCEPTOR_LOGS);
         final EngineConfiguration config = acceptingConfig(port, ACCEPTOR_ID, INITIATOR_ID)
             .scheduler(scheduler);
+        config.deleteLogFileDirOnStart(true);
         config.senderMaxBytesInBuffer(senderMaxBytesInBuffer);
+        config.messageTimingHandler(messageTimingCaptor);
         engine = FixEngine.launch(config);
         testSystem = new TestSystem(scheduler);
         final LibraryConfiguration libraryConfiguration = acceptingLibraryConfig(handler);
         libraryConfiguration.outboundMaxClaimAttempts(1);
         library = testSystem.connect(libraryConfiguration);
     }
+}
+
+class MessageTimingCaptor implements MessageTimingHandler
+{
+
+    private final IntArrayList sequenceNumbers = new IntArrayList();
+
+    public void onMessage(final int sequenceNumber, final long connectionId)
+    {
+        sequenceNumbers.add(sequenceNumber);
+    }
+
+    void verifyConsecutiveSequenceNumbers(final int lastSentMsgSeqNum)
+    {
+        assertThat(sequenceNumbers, hasSize(lastSentMsgSeqNum));
+        for (int i = 0; i < lastSentMsgSeqNum; i++)
+        {
+            final int sequenceNumber = sequenceNumbers.getInt(i);
+            assertEquals(i + 1, sequenceNumber);
+        }
+    }
+
 }

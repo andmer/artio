@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -32,9 +32,8 @@ import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.time.temporal.ChronoField.MILLI_OF_SECOND;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static org.junit.Assert.assertEquals;
-import static uk.co.real_logic.artio.fields.CalendricalUtil.MICROS_IN_MILLIS;
-import static uk.co.real_logic.artio.fields.UtcTimestampDecoder.LENGTH_WITH_MICROSECONDS;
-import static uk.co.real_logic.artio.fields.UtcTimestampDecoder.LENGTH_WITH_MILLISECONDS;
+import static uk.co.real_logic.artio.fields.CalendricalUtil.*;
+import static uk.co.real_logic.artio.fields.UtcTimestampDecoder.*;
 
 @RunWith(Parameterized.class)
 public class UtcTimestampDecoderValidCasesTest
@@ -48,60 +47,138 @@ public class UtcTimestampDecoderValidCasesTest
         return SECONDS.toMillis(utc.toEpochSecond()) + utc.getLong(MILLI_OF_SECOND);
     }
 
+    private final int length;
+    private final long expectedEpochMillis;
+    private long expectedEpochMicros;
+    private long expectedEpochNanos;
+    private final MutableAsciiBuffer buffer;
     private final String timestamp;
+    private final boolean validNanoSecondTestCase;
 
     @Parameters(name = "{0}")
-    public static Collection<String[]> data()
+    public static Collection<Object[]> data()
     {
         return Arrays.asList(
-            new String[] {"00010101-00:00:00"},
-            new String[] {"20150225-17:51:32"},
-            new String[] {"00010101-00:00:00.001"},
-            new String[] {"20150225-17:51:32.123"},
-            new String[] {"99991231-23:59:59.999"}
+            new Object[] {"20150225-17:51:32.000", true},
+            new Object[] {"20150225-17:51:32.123", true},
+            new Object[] {"20600225-17:51:32.123", true},
+            new Object[] {"00010101-00:00:00.000", false},
+            new Object[] {"00010101-00:00:00.001", false},
+            new Object[] {"99991231-23:59:59.999", false}
         );
     }
 
-    public UtcTimestampDecoderValidCasesTest(final String timestamp)
+    public UtcTimestampDecoderValidCasesTest(final String timestamp, final boolean validNanoSecondTestCase)
     {
         this.timestamp = timestamp;
-    }
+        this.validNanoSecondTestCase = validNanoSecondTestCase;
 
-    @Test
-    public void canParseTimestampWithCorrectLength()
-    {
-        canParseTimestamp(timestamp.length());
-    }
+        expectedEpochMillis = toEpochMillis(timestamp);
+        length = timestamp.length();
 
-    @Test
-    public void canParseTimestampWithLongLength()
-    {
-        canParseTimestamp(LENGTH_WITH_MILLISECONDS);
-    }
-
-    private void canParseTimestamp(final int length)
-    {
-        final long expectedEpochMillis = toEpochMillis(timestamp);
+        expectedEpochNanos = expectedEpochMillis * NANOS_IN_MILLIS;
 
         final byte[] bytes = timestamp.getBytes(US_ASCII);
-        final MutableAsciiBuffer buffer = new MutableAsciiBuffer(new byte[LENGTH_WITH_MICROSECONDS + 2]);
+        buffer = new MutableAsciiBuffer(new byte[LENGTH_WITH_NANOSECONDS + 2]);
         buffer.putBytes(1, bytes);
-
-        final long epochMillis = UtcTimestampDecoder.decode(buffer, 1, length);
-        assertEquals("Failed Millis testcase for: " + timestamp, expectedEpochMillis, epochMillis);
-
-        long expectedEpochMicros = expectedEpochMillis * MICROS_IN_MILLIS;
-
-        // If they've got the suffix field, then test microseconds, add 1 to the value
-        if (timestamp.length() == LENGTH_WITH_MILLISECONDS)
-        {
-            expectedEpochMicros++;
-            buffer.putAscii(timestamp.length() + 1, "001");
-        }
-
-        final long epochMicros = UtcTimestampDecoder.decodeMicros(buffer, 1, length + 3);
-        assertEquals("Failed Micros testcase for: " + timestamp, expectedEpochMicros, epochMicros);
+        expectedEpochMicros = expectedEpochMillis * MICROS_IN_MILLIS;
     }
 
-    // TODO: test leap second conversion 60
+    @Test
+    public void shouldParseTimestampMillis()
+    {
+        assertDecodeMillis(length);
+    }
+
+    @Test
+    public void shouldParseTimestampMillisLong()
+    {
+        putMicros();
+
+        assertDecodeMillis(LENGTH_WITH_MICROSECONDS);
+    }
+
+    private void assertDecodeMillis(final int lengthWithMicroseconds)
+    {
+        final long epochMillis = UtcTimestampDecoder.decode(buffer, 1, lengthWithMicroseconds, true);
+        assertEquals("Failed Millis testcase for: " + timestamp, expectedEpochMillis, epochMillis);
+    }
+
+    @Test
+    public void shouldParseTimestampMicros()
+    {
+        expectedEpochMicros++;
+        putMicros();
+
+        assertDecodesMicros(LENGTH_WITH_MICROSECONDS);
+    }
+
+    @Test
+    public void shouldParseTimestampMicrosShort()
+    {
+        assertDecodesMicros(length);
+    }
+
+    @Test
+    public void shouldParseTimestampMicrosLong()
+    {
+        putNanos();
+
+        assertDecodesMicros(LENGTH_WITH_NANOSECONDS);
+    }
+
+    private void assertDecodesMicros(final int length)
+    {
+        final long epochMicros = UtcTimestampDecoder.decodeMicros(buffer, 1, length, true);
+        assertEquals("Failed Micros testcase for: " + buffer.getAscii(1, length),
+            expectedEpochMicros, epochMicros);
+    }
+
+    @Test
+    public void shouldParseTimestampNanos()
+    {
+        if (validNanoSecondTestCase)
+        {
+            // If they've got the suffix field, then test microseconds, add 1 to the value
+            expectedEpochNanos++;
+            putNanos();
+
+            assertDecodesNanos(LENGTH_WITH_NANOSECONDS);
+        }
+    }
+
+    @Test
+    public void shouldParseTimestampNanosShort()
+    {
+        if (validNanoSecondTestCase)
+        {
+            expectedEpochNanos += NANOS_IN_MICROS;
+
+            putMicros();
+
+            assertDecodesNanos(LENGTH_WITH_MICROSECONDS);
+        }
+    }
+
+    private void assertDecodesNanos(final int length)
+    {
+        final long epochNanos = UtcTimestampDecoder.decodeNanos(buffer, 1, length, true);
+        assertEquals("Failed Nanos testcase for: " + timestamp, expectedEpochNanos, epochNanos);
+    }
+
+    private void putNanos()
+    {
+        putSuffix("000001");
+    }
+
+    private void putMicros()
+    {
+        putSuffix("001");
+    }
+
+    private void putSuffix(final String suffix)
+    {
+        buffer.putAscii(length + 1, suffix);
+    }
+
 }

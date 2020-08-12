@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,9 @@ package uk.co.real_logic.artio;
 
 import uk.co.real_logic.artio.protocol.GatewayPublication;
 import uk.co.real_logic.artio.protocol.NotConnectedException;
+import uk.co.real_logic.artio.util.CharFormatter;
+
+import static uk.co.real_logic.artio.LogTag.LIBRARY_CONNECT;
 
 /**
  * Bidirection application level liveness detector.
@@ -38,6 +41,8 @@ public final class LivenessDetector
     private final int libraryId;
     private final long replyTimeoutInMs;
     private final long sendIntervalInMs;
+    private final CharFormatter disconnectTriggered = new CharFormatter(
+        "%s: Disconnect triggered by a NotConnectedException (Stream CLOSED or MAX_POSITION_EXCEEDED)%n");
 
     private long latestNextReceiveTimeInMs;
     private long nextSendTimeInMs;
@@ -128,6 +133,12 @@ public final class LivenessDetector
         latestNextReceiveTimeInMs = timeInMs + replyTimeoutInMs;
     }
 
+    // Reset the connect timer for liveness purposes, but not to flip into the connected state
+    public void onConnectStep(final long timeInMs)
+    {
+        latestNextReceiveTimeInMs = timeInMs + replyTimeoutInMs;
+    }
+
     private boolean heartbeat(final long timeInMs)
     {
         try
@@ -140,6 +151,11 @@ public final class LivenessDetector
         }
         catch (final NotConnectedException ex)
         {
+            if (DebugLogger.isEnabled(LIBRARY_CONNECT))
+            {
+                DebugLogger.log(LIBRARY_CONNECT, disconnectTriggered.clear().with(libraryId));
+            }
+
             disconnect();
         }
 

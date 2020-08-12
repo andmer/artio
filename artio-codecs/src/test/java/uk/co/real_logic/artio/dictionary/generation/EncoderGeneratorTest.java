@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited., Adaptive Financial Consulting Ltd., Monotonic Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,8 +15,11 @@
  */
 package uk.co.real_logic.artio.dictionary.generation;
 
+import org.agrona.AsciiSequenceView;
+import org.agrona.DirectBuffer;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.generation.StringWriterOutputManager;
-import org.junit.Assert;
+import org.hamcrest.Matcher;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import uk.co.real_logic.artio.EncodingException;
@@ -26,16 +29,17 @@ import uk.co.real_logic.artio.fields.UtcTimestampEncoder;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 import uk.co.real_logic.artio.util.Reflection;
 
-
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 import static java.lang.reflect.Modifier.isAbstract;
 import static java.lang.reflect.Modifier.isPublic;
 import static org.agrona.generation.CompilerUtil.compileInMemory;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.*;
 import static uk.co.real_logic.artio.dictionary.ExampleDictionary.*;
+import static uk.co.real_logic.artio.dictionary.generation.AbstractDecoderGeneratorTest.assertAppendToMatches;
 import static uk.co.real_logic.artio.dictionary.generation.GenerationUtil.PARENT_PACKAGE;
 import static uk.co.real_logic.artio.util.Reflection.*;
 
@@ -43,17 +47,27 @@ public class EncoderGeneratorTest
 {
     private static Map<String, CharSequence> sources;
     private static Class<?> heartbeat;
+    private static Class<?> enumTestMessage;
     private static Class<?> otherMessage;
     private static Class<?> heartbeatWithoutValidation;
 
-    private MutableAsciiBuffer buffer = new MutableAsciiBuffer(new byte[8 * 1024]);
+    private final MutableAsciiBuffer buffer = new MutableAsciiBuffer(new byte[8 * 1024]);
 
     @BeforeClass
     public static void generate() throws Exception
     {
         sources = generateSources(true);
+        if (AbstractDecoderGeneratorTest.CODEC_LOGGING)
+        {
+            System.out.println(sources);
+        }
         heartbeat = compileInMemory(HEARTBEAT_ENCODER, sources);
-        if (heartbeat == null)
+        if (heartbeat == null && !AbstractDecoderGeneratorTest.CODEC_LOGGING)
+        {
+            System.out.println(sources);
+        }
+        enumTestMessage = compileInMemory(ENUM_TEST_MESSAGE_ENCODER, sources);
+        if (enumTestMessage == null && !AbstractDecoderGeneratorTest.CODEC_LOGGING)
         {
             System.out.println(sources);
         }
@@ -68,11 +82,12 @@ public class EncoderGeneratorTest
     {
         final Class<?> validationClass = validation ? ValidationOn.class : ValidationOff.class;
         final Class<?> rejectUnknownField = RejectUnknownFieldOff.class;
+        final Class<?> rejectUnknownEnumValue = RejectUnknownEnumValueOn.class;
         final StringWriterOutputManager outputManager = new StringWriterOutputManager();
         final EnumGenerator enumGenerator = new EnumGenerator(MESSAGE_EXAMPLE, TEST_PARENT_PACKAGE, outputManager);
         final EncoderGenerator encoderGenerator =
-            new EncoderGenerator(MESSAGE_EXAMPLE, 1, TEST_PACKAGE, TEST_PARENT_PACKAGE, outputManager, validationClass,
-            rejectUnknownField);
+            new EncoderGenerator(MESSAGE_EXAMPLE, TEST_PACKAGE, TEST_PARENT_PACKAGE, outputManager, validationClass,
+            rejectUnknownField, rejectUnknownEnumValue, Generator.RUNTIME_REJECT_UNKNOWN_ENUM_VALUE_PROPERTY);
         enumGenerator.generate();
         encoderGenerator.generate();
         return outputManager.getSources();
@@ -109,6 +124,32 @@ public class EncoderGeneratorTest
     }
 
     @Test
+    public void shouldNotWriteDataForEmptyCharSequence() throws Exception
+    {
+        final Object encoder = heartbeat.getConstructor().newInstance();
+
+        setTestReqIdTo(encoder, "");
+
+        assertArrayEquals(new byte[0], getTestReqIdBytes(encoder));
+        assertTestReqIdOffset(0, encoder);
+        assertTestReqIdLength(0, encoder);
+    }
+
+    @Test
+    public void shouldNotWriteDataForEmptyAsciiSequenceView() throws Exception
+    {
+        final Object encoder = heartbeat.getConstructor().newInstance();
+
+        heartbeat
+                .getMethod(TEST_REQ_ID, AsciiSequenceView.class)
+                .invoke(encoder, new AsciiSequenceView());
+
+        assertArrayEquals(new byte[0], getTestReqIdBytes(encoder));
+        assertTestReqIdOffset(0, encoder);
+        assertTestReqIdLength(0, encoder);
+    }
+
+    @Test
     public void stringSettersResizeByteArray() throws Exception
     {
         final Encoder encoder = newHeartbeat();
@@ -121,7 +162,7 @@ public class EncoderGeneratorTest
     }
 
     @Test
-    public void byteArraySettersWriteToFields() throws Exception
+    public void shouldWriteByteArraySettersToFields() throws Exception
     {
         final Encoder encoder = newHeartbeat();
 
@@ -130,16 +171,15 @@ public class EncoderGeneratorTest
             .invoke(encoder, VALUE_IN_BYTES);
 
         assertTestReqIsValue(encoder);
-
         assertEncodesTestReqIdFully(encoder);
     }
 
     @Test
-    public void offsetAndLengthbyteArraySettersWriteFields() throws Exception
+    public void offsetAndLengthByteArraySettersWriteFields() throws Exception
     {
         final Encoder encoder = newHeartbeat();
 
-        setTestReqIdBytes(encoder, 1, 3);
+        setTestReqIdBytes(encoder);
 
         assertArrayEquals(PREFIXED_VALUE_IN_BYTES, getTestReqIdBytes(encoder));
         assertTestReqIdOffset(1, encoder);
@@ -148,12 +188,47 @@ public class EncoderGeneratorTest
         assertEncodesTestReqIdFully(encoder);
     }
 
-    private void setTestReqIdBytes(
-        final Object encoder, final int offset, final int length) throws Exception
+    @Test
+    public void shouldWriteDirectBufferSettersToFields() throws Exception
     {
+        final Encoder encoder = newHeartbeat();
+
         heartbeat
-            .getMethod(TEST_REQ_ID, byte[].class, int.class, int.class)
-            .invoke(encoder, PREFIXED_VALUE_IN_BYTES, offset, length);
+            .getMethod(TEST_REQ_ID, DirectBuffer.class)
+            .invoke(encoder, new UnsafeBuffer(VALUE_IN_BYTES));
+
+        assertTestReqIsValue(encoder);
+        assertEncodesTestReqIdFully(encoder);
+    }
+
+    @Test
+    public void offsetAndLengthDirectBufferSettersWriteFields() throws Exception
+    {
+        final Encoder encoder = newHeartbeat();
+
+        setTestReqIdBuffer(encoder);
+
+        assertArrayEquals(PREFIXED_VALUE_IN_BYTES, getTestReqIdBytes(encoder));
+        assertTestReqIdOffset(1, encoder);
+        assertTestReqIdLength(3, encoder);
+
+        assertEncodesTestReqIdFully(encoder);
+    }
+
+    @Test
+    public void shouldWriteAsciiSequenceViewSetters() throws Exception
+    {
+        final Encoder encoder = newHeartbeat();
+
+        heartbeat
+            .getMethod(TEST_REQ_ID, AsciiSequenceView.class)
+            .invoke(encoder, new AsciiSequenceView(new UnsafeBuffer(PREFIXED_VALUE_IN_BYTES), 1, 3));
+
+        assertArrayEquals(PREFIXED_VALUE_IN_BYTES, getTestReqIdBytes(encoder));
+        assertTestReqIdOffset(1, encoder);
+        assertTestReqIdLength(3, encoder);
+
+        assertEncodesTestReqIdFully(encoder);
     }
 
     @Test
@@ -173,11 +248,37 @@ public class EncoderGeneratorTest
     {
         final Object encoder = heartbeat.getConstructor().newInstance();
 
-        setEnumByRepresentation(encoder,
+        setEnum(encoder,
             ON_BEHALF_OF_COMP_ID,
             PARENT_PACKAGE + ".OnBehalfOfCompID",
             "abc");
         assertOnBehalfOfCompIDValue(encoder, "abc");
+    }
+
+    @Test
+    public void stringSettersByEnumDoesNothingNullValue() throws Exception
+    {
+        final Object encoder = heartbeat.getConstructor().newInstance();
+        setEnum(encoder,
+            ON_BEHALF_OF_COMP_ID,
+            PARENT_PACKAGE + ".OnBehalfOfCompID",
+            "NULL_VAL"
+        );
+        assertOnBehalfOfCompIDValue(encoder, "");
+    }
+
+    @Test
+    public void stringSettersByEnumThrowForUnknownValue() throws Exception
+    {
+        final Object encoder = heartbeat.getConstructor().newInstance();
+        assertThrows(EncodingException.class, () ->
+        {
+            setEnum(encoder,
+                ON_BEHALF_OF_COMP_ID,
+                PARENT_PACKAGE + ".OnBehalfOfCompID",
+                "ARTIO_UNKNOWN"
+            );
+        });
     }
 
     @Test
@@ -194,9 +295,27 @@ public class EncoderGeneratorTest
     public void intSettersByEnumWriteToFields() throws Exception
     {
         final Object encoder = heartbeat.getConstructor().newInstance();
-        setEnumByRepresentation(encoder, INT_FIELD, PARENT_PACKAGE + ".IntField", 1);
+        setEnum(encoder, INT_FIELD, PARENT_PACKAGE + ".IntField", "ONE");
 
         assertEquals(1, getField(encoder, INT_FIELD));
+    }
+
+    @Test
+    public void intSettersByEnumDoesNothingForNullValue() throws Exception
+    {
+        final Object encoder = heartbeat.getConstructor().newInstance();
+        setEnum(encoder, INT_FIELD, PARENT_PACKAGE + ".IntField", "NULL_VAL");
+        assertEquals(0, getField(encoder, INT_FIELD));
+    }
+
+    @Test
+    public void intSettersByEnumThrowForUnknownValue() throws Exception
+    {
+        final Object encoder = heartbeat.getConstructor().newInstance();
+        assertThrows(EncodingException.class, () ->
+        {
+            setEnum(encoder, INT_FIELD, PARENT_PACKAGE + ".IntField", "ARTIO_UNKNOWN");
+        });
     }
 
     @Test
@@ -208,7 +327,7 @@ public class EncoderGeneratorTest
 
         setFloat(encoder, FLOAT_FIELD, value);
 
-        Assert.assertEquals(value, getField(encoder, FLOAT_FIELD));
+        assertEquals(value, getField(encoder, FLOAT_FIELD));
     }
 
     @Test
@@ -238,6 +357,7 @@ public class EncoderGeneratorTest
         setupTrailer(encoder);
 
         setOptionalFields(encoder);
+        setDataFieldLength(encoder);
         assertEncodesTo(encoder, ENCODED_MESSAGE);
     }
 
@@ -278,7 +398,25 @@ public class EncoderGeneratorTest
         setupTrailer(encoder);
 
         setOptionalFields(encoder);
+        setDataFieldLength(encoder);
+
         assertEncodesTo(encoder, ENCODED_MESSAGE);
+    }
+
+    @Test
+    public void encodeDecimalFloatWithoutAlteringSentinelValue() throws Exception
+    {
+        //Given
+        final Encoder encoder = newHeartbeat();
+        final DecimalFloat zero = DecimalFloat.ZERO;
+
+        setFloat(encoder, FLOAT_FIELD, zero);
+
+        //When
+        setFloatFieldRawValues(encoder);
+
+        //Then
+        assertThat(zero, is(new DecimalFloat()));
     }
 
     @Test
@@ -320,6 +458,7 @@ public class EncoderGeneratorTest
 
         setRequiredFields(encoder);
         setOptionalFields(encoder);
+        setDataFieldLength(encoder);
 
         assertThat(encoder.toString(), containsString(STRING_ENCODED_MESSAGE_SUFFIX));
     }
@@ -336,19 +475,6 @@ public class EncoderGeneratorTest
         setCharSequence(encoder, ON_BEHALF_OF_COMP_ID, "ab");
 
         assertEncodesTo(encoder, SHORTER_STRING_MESSAGE);
-    }
-
-    @Test
-    public void shouldToStringShorterStringsAfterLongerStrings() throws Exception
-    {
-        final Encoder encoder = newHeartbeat();
-
-        setRequiredFields(encoder);
-
-        setCharSequence(encoder, ON_BEHALF_OF_COMP_ID, "ab");
-
-        assertThat(encoder.toString(), containsString("ab"));
-        assertThat(encoder.toString(), not(containsString("abc")));
     }
 
     @Test
@@ -522,34 +648,6 @@ public class EncoderGeneratorTest
     }
 
     @Test
-    public void shouldGenerateToStringForShorterGroups() throws Exception
-    {
-        final Encoder encoder = newHeartbeat();
-        setEgGroupToTwoElements(encoder);
-
-        setRequiredFields(encoder);
-        setEgGroupToOneElement(encoder);
-
-        assertThat(encoder, hasToString(containsString(STRING_GROUP_ONE_ELEMENT)));
-    }
-
-    @Test
-    public void shouldGenerateToStringForShorterGroupsAfterReset() throws Exception
-    {
-        final Encoder encoder = newHeartbeat();
-
-        setRequiredFields(encoder);
-        setEgGroupToTwoElements(encoder);
-
-        reset(encoder);
-
-        setRequiredFields(encoder);
-        setEgGroupToOneElement(encoder);
-
-        assertThat(encoder, hasToString(containsString(STRING_GROUP_ONE_ELEMENT)));
-    }
-
-    @Test
     public void shouldIgnoreUnnecessaryGroupNextCalls() throws Exception
     {
         final Encoder encoder = newHeartbeat();
@@ -610,6 +708,60 @@ public class EncoderGeneratorTest
         encoder.encode(buffer, 1);
     }
 
+    @Test(expected = EncodingException.class)
+    public void shouldValidateMissingRequiredCharEnumFields() throws Exception
+    {
+        final Encoder encoder = newEnumTestMessage();
+
+        setEnum(
+            encoder,
+            INT_ENUM_REQ,
+            PARENT_PACKAGE + ".IntEnumReq",
+            "THIRTY");
+        setEnum(
+            encoder,
+            STRING_ENUM_REQ,
+            PARENT_PACKAGE + ".StringEnumReq",
+            "GAMMA");
+        encoder.encode(buffer, 1);
+    }
+
+    @Test(expected = EncodingException.class)
+    public void shouldValidateMissingRequiredIntEnumFields() throws Exception
+    {
+        final Encoder encoder = newEnumTestMessage();
+
+        setEnum(
+            encoder,
+            CHAR_ENUM_REQ,
+            PARENT_PACKAGE + ".CharEnumReq",
+            "C");
+        setEnum(
+            encoder,
+            STRING_ENUM_REQ,
+            PARENT_PACKAGE + ".StringEnumReq",
+            "GAMMA");
+        encoder.encode(buffer, 1);
+    }
+
+    @Test(expected = EncodingException.class)
+    public void shouldValidateMissingRequiredStringEnumFields() throws Exception
+    {
+        final Encoder encoder = newEnumTestMessage();
+
+        setEnum(
+            encoder,
+            CHAR_ENUM_REQ,
+            PARENT_PACKAGE + ".CharEnumReq",
+            "C");
+        setEnum(
+            encoder,
+            INT_ENUM_REQ,
+            PARENT_PACKAGE + ".IntEnumReq",
+            "THIRTY");
+        encoder.encode(buffer, 1);
+    }
+
     @Test
     public void canDisableRequiredStringFieldValidation() throws Exception
     {
@@ -654,16 +806,6 @@ public class EncoderGeneratorTest
     }
 
     @Test
-    public void shouldGenerateToStringForGroups() throws Exception
-    {
-        final Encoder encoder = newHeartbeat();
-        setRequiredFields(encoder);
-        setEgGroupToTwoElements(encoder);
-
-        assertThat(encoder, hasToString(containsString(STRING_GROUP_TWO_ELEMENTS)));
-    }
-
-    @Test
     public void shouldGenerateComponentClass() throws Exception
     {
         final Class<?> component = compileInMemory(COMPONENT_ENCODER, sources);
@@ -690,7 +832,65 @@ public class EncoderGeneratorTest
 
         setupComponent(encoder);
 
-        assertThat(encoder.toString(), containsString(COMPONENT_TO_STRING));
+        assertToStringAndAppendToMatches(encoder, containsString(COMPONENT_TO_STRING));
+    }
+
+    @Test
+    public void shouldGenerateToStringForGroups() throws Exception
+    {
+        final Encoder encoder = newHeartbeat();
+        setRequiredFields(encoder);
+        setEgGroupToTwoElements(encoder);
+
+        assertToStringAndAppendToMatches(encoder, containsString(STRING_GROUP_TWO_ELEMENTS));
+    }
+
+    @Test
+    public void shouldGenerateToStringForShorterGroups() throws Exception
+    {
+        final Encoder encoder = newHeartbeat();
+        setEgGroupToTwoElements(encoder);
+
+        setRequiredFields(encoder);
+        setEgGroupToOneElement(encoder);
+
+        assertToStringAndAppendToMatches(encoder, containsString(STRING_GROUP_ONE_ELEMENT));
+    }
+
+    @Test
+    public void shouldGenerateToStringForShorterGroupsAfterReset() throws Exception
+    {
+        final Encoder encoder = newHeartbeat();
+
+        setRequiredFields(encoder);
+        setEgGroupToTwoElements(encoder);
+
+        reset(encoder);
+
+        setRequiredFields(encoder);
+        setEgGroupToOneElement(encoder);
+
+        assertToStringAndAppendToMatches(encoder, containsString(STRING_GROUP_ONE_ELEMENT));
+    }
+
+    @Test
+    public void shouldToStringShorterStringsAfterLongerStrings() throws Exception
+    {
+        final Encoder encoder = newHeartbeat();
+
+        setRequiredFields(encoder);
+
+        setCharSequence(encoder, ON_BEHALF_OF_COMP_ID, "ab");
+
+        assertToStringAndAppendToMatches(encoder, containsString("ab"));
+        assertToStringAndAppendToMatches(encoder, not(containsString("abc")));
+    }
+
+    private void assertToStringAndAppendToMatches(final Encoder encoder, final Matcher<String> matcher)
+    {
+        assertThat(encoder.toString(), matcher);
+
+        assertAppendToMatches(encoder::appendTo, matcher);
     }
 
     @Test
@@ -735,9 +935,11 @@ public class EncoderGeneratorTest
 
         Object componentGroup = getComponentGroup(egComponent, 2);
         setComponentGroupField(componentGroup, 1);
+        setRequiredComponentGroupField(componentGroup, 10);
 
         componentGroup = next(componentGroup);
         setComponentGroupField(componentGroup, 2);
+        setRequiredComponentGroupField(componentGroup, 20);
     }
 
     private void setEgGroupToTwoElements(final Encoder encoder) throws Exception
@@ -765,6 +967,11 @@ public class EncoderGeneratorTest
     private void setComponentGroupField(final Object group, final int value) throws Exception
     {
         setInt(group, "componentGroupField", value);
+    }
+
+    private void setRequiredComponentGroupField(final Object group, final int value) throws Exception
+    {
+        setInt(group, "requiredComponentGroupField", value);
     }
 
     private void setupHeader(final Encoder encoder) throws Exception
@@ -864,15 +1071,19 @@ public class EncoderGeneratorTest
 
     private byte[] getTestReqIdBytes(final Object encoder) throws Exception
     {
-        return (byte[])getField(encoder, TEST_REQ_ID);
+        return getBytesField(encoder, TEST_REQ_ID);
+    }
+
+    private byte[] getBytesField(final Object encoder, final String fieldName) throws Exception
+    {
+        return ((UnsafeBuffer)getField(encoder, fieldName)).byteArray();
     }
 
     private void assertOnBehalfOfCompIDValue(final Object encoder, final String value) throws Exception
     {
-        assertArrayEquals(value.getBytes(), (byte[])getField(encoder, ON_BEHALF_OF_COMP_ID));
+        assertArrayEquals(value.getBytes(), getBytesField(encoder, ON_BEHALF_OF_COMP_ID));
         assertEquals(value.length(), getField(encoder, ON_BEHALF_OF_COMP_ID_LENGTH));
     }
-
 
     private boolean hasTestReqId(final Object encoder) throws Exception
     {
@@ -894,6 +1105,11 @@ public class EncoderGeneratorTest
         return (Encoder)heartbeat.getConstructor().newInstance();
     }
 
+    private Encoder newEnumTestMessage() throws Exception
+    {
+        return (Encoder)enumTestMessage.getConstructor().newInstance();
+    }
+
     private void assertTestReqIdLength(final int expectedLength, final Object encoder) throws Exception
     {
         assertEquals(expectedLength, getField(encoder, TEST_REQ_ID_LENGTH));
@@ -909,5 +1125,26 @@ public class EncoderGeneratorTest
         setRequiredFields(encoder);
         assertThat(encoder.toString(), containsString(STRING_ONLY_TESTREQ_MESSAGE_SUFFIX));
         assertEncodesTo(encoder, ONLY_TESTREQ_ENCODED_MESSAGE);
+    }
+
+    private void setTestReqIdBytes(
+        final Object encoder) throws Exception
+    {
+        heartbeat
+            .getMethod(TEST_REQ_ID, byte[].class, int.class, int.class)
+            .invoke(encoder, PREFIXED_VALUE_IN_BYTES, 1, 3);
+    }
+
+    private void setTestReqIdBuffer(
+        final Object encoder) throws Exception
+    {
+        heartbeat
+            .getMethod(TEST_REQ_ID, DirectBuffer.class, int.class, int.class)
+            .invoke(encoder, new UnsafeBuffer(PREFIXED_VALUE_IN_BYTES), 1, 3);
+    }
+
+    private void setDataFieldLength(final Encoder encoder) throws Exception
+    {
+        setInt(encoder, "dataFieldLength", 3);
     }
 }

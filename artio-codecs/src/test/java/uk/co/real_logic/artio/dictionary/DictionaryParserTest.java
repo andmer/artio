@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,7 +16,7 @@
 package uk.co.real_logic.artio.dictionary;
 
 import org.hamcrest.Matcher;
-import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import uk.co.real_logic.artio.dictionary.ir.*;
 import uk.co.real_logic.artio.dictionary.ir.Field.Type;
@@ -24,6 +24,7 @@ import uk.co.real_logic.artio.dictionary.ir.Field.Value;
 
 import java.util.List;
 
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.*;
 import static uk.co.real_logic.artio.dictionary.ir.Category.ADMIN;
@@ -31,15 +32,14 @@ import static uk.co.real_logic.artio.dictionary.ir.Field.Type.INT;
 import static uk.co.real_logic.artio.dictionary.ir.Field.Type.STRING;
 import static uk.co.real_logic.artio.util.CustomMatchers.hasFluentProperty;
 
-@SuppressWarnings("unchecked")
 public class DictionaryParserTest
 {
     private static final String EXAMPLE_FILE = "example_dictionary.xml";
 
-    private Dictionary dictionary;
+    private static Dictionary dictionary;
 
-    @Before
-    public void setUp() throws Exception
+    @BeforeClass
+    public static void setUp() throws Exception
     {
         dictionary = parseExample();
     }
@@ -237,22 +237,58 @@ public class DictionaryParserTest
     @Test
     public void shouldDedupeFieldsIncludedTwice()
     {
-        shouldThrow(() -> parseDictionary("example_invalid_dictionary_2.xml"),
+        shouldThrow(() -> parseDictionary("example_invalid_dictionary_fields_included_twice.xml"),
             IllegalStateException.class,
             "Cannot have the same field defined more than once on a message; this is against the FIX spec. " +
             "Details to follow:\n" +
-            "Message: DedupeFieldsTest Field : MemberSubID (104)\n");
+            "Message: DedupeFieldsTest Field : MemberSubID (104)\n" +
+            "Use -Dfix.codecs.allow_duplicate_fields=true to allow duplicated fields (Dangerous. May break parser)."
+        );
+    }
+
+    @Test
+    public void shouldDedupeFieldsIncludedTwiceTurnOn() throws Exception
+    {
+        shouldThrow(() -> parseDictionary("example_duplicate_dictionary.xml"),
+            IllegalStateException.class,
+            "Cannot have the same field defined more than once on a message; this is against the FIX spec. " +
+            "Details to follow:\n" +
+            "Message: DuplicatedFieldMessage Field : MemberID (100) Through Path: [MemberIDsGroup, Members]\n" +
+            "Use -Dfix.codecs.allow_duplicate_fields=true to allow duplicated fields (Dangerous. May break parser)."
+        );
+        parseDictionary("example_duplicate_dictionary.xml", true);
     }
 
     @Test
     public void shouldFailIfTwoFieldsAppearInSameMessage()
     {
-        shouldThrow(() -> parseDictionary("example_invalid_dictionary.xml"),
+        shouldThrow(() -> parseDictionary("example_invalid_dictionary_field_in_group_and_message.xml"),
             IllegalStateException.class,
             "Cannot have the same field defined more than once on a message; this is against the FIX spec. " +
             "Details to follow:\n" +
             "Message: PoorlyDefinedMessage Field : MemberSubID (104) Through Path: [NextComponent, Members]\n" +
-            "Message: PoorlyDefinedMessage Field : MemberSubID (104) Through Path: [NextComponent]\n");
+            "Message: PoorlyDefinedMessage Field : MemberSubID (104) Through Path: [NextComponent]\n" +
+            "Use -Dfix.codecs.allow_duplicate_fields=true to allow duplicated fields (Dangerous. May break parser).");
+    }
+
+    @Test
+    public void shouldFailIfFieldDefinitionDuplicated()
+    {
+        shouldThrow(() -> parseDictionary("example_invalid_dictionary_duplicate_field_definitions.xml"),
+            IllegalStateException.class,
+            "Cannot have the same field name defined twice; this is against the FIX spec." +
+            "Details to follow:\n" +
+            "Field : MemberID (101)\n" +
+            "Field : MemberID (100)");
+    }
+
+    @Test
+    public void shouldNotAllowDataFieldWithoutLength()
+    {
+        shouldThrow(() -> parseDictionary("example_invalid_dictionary_data_field_without_length.xml"),
+            IllegalStateException.class,
+            "Each DATA field must have a corresponding LENGTH field using the suffix 'Len' or 'Length'." +
+            " RawData is missing a length field in EgGroupGroup");
     }
 
     private Component component(final String name)
@@ -280,15 +316,20 @@ public class DictionaryParserTest
         return dictionary.fields().get(name);
     }
 
-    private Dictionary parseExample() throws Exception
+    private static Dictionary parseExample() throws Exception
     {
         return parseDictionary(EXAMPLE_FILE);
     }
 
-    private Dictionary parseDictionary(final String name) throws Exception
+    private static Dictionary parseDictionary(final String name) throws Exception
     {
-        return new DictionaryParser()
-            .parse(DictionaryParserTest.class.getResourceAsStream(name), null);
+        return parseDictionary(name, false);
+    }
+
+    private static Dictionary parseDictionary(final String name, final boolean allowDuplicates) throws Exception
+    {
+        return new DictionaryParser(allowDuplicates)
+                .parse(DictionaryParserTest.class.getResourceAsStream(name), null);
     }
 
     private <T> Matcher<T> withElement(final Matcher<?> valueMatcher)
@@ -348,8 +389,16 @@ public class DictionaryParserTest
         }
         catch (final Exception e)
         {
-            assertThat(e.getClass(), typeCompatibleWith(expectedException));
-            assertThat(e.getMessage(), is(message));
+            try
+            {
+                assertThat(e.getClass(), typeCompatibleWith(expectedException));
+                assertThat(e.getMessage(), is(message));
+            }
+            catch (final AssertionError error)
+            {
+                e.printStackTrace();
+                throw error;
+            }
         }
     }
 

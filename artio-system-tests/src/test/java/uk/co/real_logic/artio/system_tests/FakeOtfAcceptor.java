@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -24,14 +24,15 @@ import uk.co.real_logic.artio.otf.MessageControl;
 import uk.co.real_logic.artio.otf.OtfMessageAcceptor;
 import uk.co.real_logic.artio.session.Session;
 import uk.co.real_logic.artio.util.AsciiBuffer;
+import uk.co.real_logic.artio.util.CharFormatter;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.function.Predicate;
 import java.util.stream.Stream;
 
-import static org.junit.Assert.assertThat;
-import static uk.co.real_logic.artio.Constants.MSG_TYPE;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static uk.co.real_logic.artio.Constants.*;
 import static uk.co.real_logic.artio.LogTag.FIX_TEST;
 import static uk.co.real_logic.artio.system_tests.FixMessage.hasMessageSequenceNumber;
 import static uk.co.real_logic.artio.system_tests.FixMessage.hasSequenceIndex;
@@ -42,6 +43,7 @@ import static uk.co.real_logic.artio.system_tests.FixMessage.hasSequenceIndex;
 public class FakeOtfAcceptor implements OtfMessageAcceptor
 {
     private final List<FixMessage> receivedMessages = new ArrayList<>();
+    private final CharFormatter formatter = new CharFormatter("Field: %s=%s%n");
 
     private ValidationError error;
     private boolean isCompleted;
@@ -68,7 +70,7 @@ public class FakeOtfAcceptor implements OtfMessageAcceptor
     public synchronized MessageControl onField(
         final int tag, final AsciiBuffer buffer, final int offset, final int length)
     {
-        DebugLogger.log(FIX_TEST, "Field: %s=%s%n", tag, buffer, offset, length);
+        DebugLogger.log(FIX_TEST, formatter, tag, buffer, offset, length);
         if (tag == Constants.SENDER_COMP_ID)
         {
             senderCompId = buffer.getAscii(offset, length);
@@ -95,12 +97,21 @@ public class FakeOtfAcceptor implements OtfMessageAcceptor
 
     public boolean onError(
         final ValidationError error,
-        final int messageType,
+        final long messageType,
         final int tagNumber,
         final AsciiFieldFlyweight value)
     {
         this.error = error;
-        System.err.printf("%s for %d @ %d%n", error, messageType, tagNumber);
+        if (messageType != LOGON_MESSAGE)
+        {
+            System.err.printf("%s for %d @ %d%n", error, messageType, tagNumber);
+        }
+        else
+        {
+            isCompleted = true;
+            receivedMessages.add(message);
+            message = null;
+        }
         return false;
     }
 
@@ -143,11 +154,25 @@ public class FakeOtfAcceptor implements OtfMessageAcceptor
         return lastReceivedMessage().lastMsgSeqNumProcessed();
     }
 
-    public Stream<FixMessage> hasReceivedMessage(final String messageType)
+    public Stream<FixMessage> receivedMessage(final String messageType)
     {
         return messages()
             .stream()
             .filter((fixMessage) -> fixMessage.get(MSG_TYPE).equals(messageType));
+    }
+
+    public Stream<FixMessage> receivedReplay(final String messageType, final int sequenceNumber)
+    {
+        return receivedMessage(messageType)
+            .filter(msg -> "Y".equals(msg.possDup()))
+            .filter(msg -> sequenceNumber == msg.messageSequenceNumber());
+    }
+
+    public Stream<FixMessage> receivedReplayGapFill(final int sequenceNumber, final int newSeqNo)
+    {
+        return receivedReplay(SEQUENCE_RESET_MESSAGE_AS_STR, sequenceNumber)
+            .filter(msg -> "Y".equals(msg.get(GAP_FILL_FLAG)))
+            .filter(msg -> newSeqNo == msg.getInt(NEW_SEQ_NO));
     }
 
     void allMessagesHaveSequenceIndex(final int sequenceIndex)

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,10 +15,11 @@
  */
 package uk.co.real_logic.artio.library;
 
-import org.agrona.Verify;
 import org.agrona.concurrent.IdleStrategy;
 import uk.co.real_logic.artio.CommonConfiguration;
+import uk.co.real_logic.artio.session.DirectSessionProxy;
 import uk.co.real_logic.artio.session.SessionIdStrategy;
+import uk.co.real_logic.artio.session.SessionProxyFactory;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -40,7 +41,6 @@ public final class LibraryConfiguration extends CommonConfiguration
 {
     public static final GatewayErrorHandler DEFAULT_GATEWAY_ERROR_HANDLER =
         (errorType, libraryId, message) -> CONTINUE;
-    public static final SentPositionHandler DEFAULT_SENT_POSITION_HANDLER = position -> CONTINUE;
     public static final SessionExistsHandler DEFAULT_SESSION_EXISTS_HANDLER =
         (library,
         sessionId,
@@ -49,7 +49,9 @@ public final class LibraryConfiguration extends CommonConfiguration
         senderLocationId,
         targetCompId,
         remoteSubId,
-        remoteLocationId) -> {};
+        remoteLocationId,
+        logonReceivedSequence,
+        logonSequenceIndex) -> {};
     public static final LibraryConnectHandler DEFAULT_LIBRARY_CONNECT_HANDLER = new LibraryConnectHandler()
     {
         public void onConnect(final FixLibrary library)
@@ -60,6 +62,8 @@ public final class LibraryConfiguration extends CommonConfiguration
         {
         }
     };
+
+    public static final SessionProxyFactory DEFAULT_SESSION_PROXY_FACTORY = DirectSessionProxy::new;
 
     private final int libraryId;
 
@@ -78,11 +82,11 @@ public final class LibraryConfiguration extends CommonConfiguration
     private IdleStrategy libraryIdleStrategy = backoffIdleStrategy();
     private SessionExistsHandler sessionExistsHandler = DEFAULT_SESSION_EXISTS_HANDLER;
     private GatewayErrorHandler gatewayErrorHandler = DEFAULT_GATEWAY_ERROR_HANDLER;
-    private SentPositionHandler sentPositionHandler = DEFAULT_SENT_POSITION_HANDLER;
     private List<String> libraryAeronChannels = new ArrayList<>();
     private LibraryConnectHandler libraryConnectHandler = DEFAULT_LIBRARY_CONNECT_HANDLER;
     private LibraryScheduler scheduler = new DefaultLibraryScheduler();
     private String libraryName = "";
+    private SessionProxyFactory sessionProxyFactory = DEFAULT_SESSION_PROXY_FACTORY;
 
     /**
      * When a new session connects to the gateway you register a callback handler to find
@@ -123,12 +127,6 @@ public final class LibraryConfiguration extends CommonConfiguration
         return this;
     }
 
-    public LibraryConfiguration sentPositionHandler(final SentPositionHandler sentPositionHandler)
-    {
-        this.sentPositionHandler = sentPositionHandler;
-        return this;
-    }
-
     public LibraryConfiguration libraryConnectHandler(final LibraryConnectHandler libraryConnectHandler)
     {
         this.libraryConnectHandler = libraryConnectHandler;
@@ -161,11 +159,6 @@ public final class LibraryConfiguration extends CommonConfiguration
         return gatewayErrorHandler;
     }
 
-    public SentPositionHandler sentPositionHandler()
-    {
-        return sentPositionHandler;
-    }
-
     public LibraryConnectHandler libraryConnectHandler()
     {
         return libraryConnectHandler;
@@ -174,6 +167,11 @@ public final class LibraryConfiguration extends CommonConfiguration
     public LibraryScheduler scheduler()
     {
         return scheduler;
+    }
+
+    public SessionProxyFactory sessionProxyFactory()
+    {
+        return sessionProxyFactory;
     }
 
     /**
@@ -216,6 +214,20 @@ public final class LibraryConfiguration extends CommonConfiguration
     }
 
     /**
+     * Sets the factory for creating Session Proxies.
+     *
+     * @see uk.co.real_logic.artio.session.SessionProxy
+     *
+     * @param sessionProxyFactory the factory for creating Session Proxies.
+     * @return this
+     */
+    public LibraryConfiguration sessionProxyFactory(final SessionProxyFactory sessionProxyFactory)
+    {
+        this.sessionProxyFactory = sessionProxyFactory;
+        return this;
+    }
+
+    /**
      * {@inheritDoc}
      */
     public LibraryConfiguration replyTimeoutInMs(final long replyTimeoutInMs)
@@ -227,8 +239,6 @@ public final class LibraryConfiguration extends CommonConfiguration
     void conclude()
     {
         super.conclude("library-" + libraryId());
-
-        Verify.notNull(sessionAcquireHandler, "sessionAcquireHandler");
 
         if (libraryAeronChannels.isEmpty())
         {

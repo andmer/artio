@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,9 +17,6 @@ package uk.co.real_logic.artio.engine;
 
 import uk.co.real_logic.artio.session.CompositeKey;
 
-/**
- * Class represents information that a gateway is aware of about a session.
- */
 public interface SessionInfo
 {
     /**
@@ -28,18 +25,9 @@ public interface SessionInfo
     int UNK_SESSION = -1;
 
     /**
-     * Get the identification number of the connection in question.
-     *
-     * @return the identification number of the connection in question.
+     * The used to identify a sequenceIndex that hasn't yet been identified
      */
-    long connectionId();
-
-    /**
-     * Get the remove address to which this session is connected.
-     *
-     * @return the remove address to which this session is connected.
-     */
-    String address();
+    int UNKNOWN_SEQUENCE_INDEX = -1;
 
     /**
      * Get the identification number of the session in question or {@link #UNK_SESSION}
@@ -58,9 +46,10 @@ public interface SessionInfo
     CompositeKey sessionKey();
 
     /**
-     * Returns the number of bytes outstanding in the quarantine buffer to send.
+     * Get the sesssion sequence index or {@link #UNKNOWN_SEQUENCE_INDEX}
+     * if the session hasn't completed its logon yet.
      *
-     * @return number of bytes outstanding in the quarantine buffer to send.
+     * @return the sequenceIndex
      */
-    long bytesInBuffer();
+    int sequenceIndex();
 }

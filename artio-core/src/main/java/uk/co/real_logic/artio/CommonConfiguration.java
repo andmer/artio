@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,18 +17,23 @@ package uk.co.real_logic.artio;
 
 import io.aeron.Aeron;
 import org.agrona.IoUtil;
+import org.agrona.Verify;
 import org.agrona.concurrent.BackoffIdleStrategy;
+import org.agrona.concurrent.EpochNanoClock;
 import org.agrona.concurrent.IdleStrategy;
+import org.agrona.concurrent.errors.ErrorConsumer;
+import uk.co.real_logic.artio.fields.EpochFractionFormat;
 import uk.co.real_logic.artio.session.SessionCustomisationStrategy;
 import uk.co.real_logic.artio.session.SessionIdStrategy;
 import uk.co.real_logic.artio.timing.HistogramHandler;
-import uk.co.real_logic.artio.validation.AuthenticationStrategy;
+import uk.co.real_logic.artio.util.OffsetEpochNanoClock;
 import uk.co.real_logic.artio.validation.MessageValidationStrategy;
 
 import java.io.File;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.Set;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Stream;
 
@@ -93,6 +98,11 @@ public class CommonConfiguration
      */
     public static final String DEBUG_FILE_PROPERTY = "fix.core.debug.file";
     /**
+     * Property name for the implementation of {@link AbstractDebugAppender} to use in order
+     * print debug logging. If none set then defaults to {@link PrintingDebugAppender}
+     */
+    public static final String APPENDER_CLASS_PROPERTY = "fix.core.debug.appender";
+    /**
      * Property name for the period at which histogram intervals are polled and logged
      */
     public static final String HISTOGRAM_POLL_PERIOD_IN_MS_PROPERTY = "fix.benchmark.histogram_poll_period";
@@ -100,6 +110,12 @@ public class CommonConfiguration
      * Property name for the file to which histogram intervals are logged
      */
     public static final String HISTOGRAM_LOGGING_FILE_PROPERTY = "fix.benchmark.histogram_file";
+
+    /**
+     * Property name for character to separate debug logging of FIX messages
+     */
+    public static final String LOGGING_SEPARATOR_PROPERTY = "fix.core.debug.separator";
+    protected ThreadFactory threadFactory;
 
     public static void validateTimeout(final long timeoutInMs)
     {
@@ -121,6 +137,8 @@ public class CommonConfiguration
     public static final boolean DEBUG_PRINT_MESSAGES;
     public static final Set<LogTag> DEBUG_TAGS;
     public static final String DEBUG_PRINT_THREAD;
+    public static final byte DEFAULT_DEBUG_LOGGING_SEPARATOR = '\001';
+    public static final byte DEBUG_LOGGING_SEPARATOR;
 
     static
     {
@@ -156,9 +174,14 @@ public class CommonConfiguration
         DEBUG_PRINT_THREAD = debugPrintThreadValue == null ? null : debugPrintThreadValue + " : ";
         DEBUG_PRINT_MESSAGES = debugPrintMessages;
         DEBUG_TAGS = debugTags;
+
+        final String loggingSeparator = getProperty(LOGGING_SEPARATOR_PROPERTY);
+        DEBUG_LOGGING_SEPARATOR =
+            loggingSeparator == null ? DEFAULT_DEBUG_LOGGING_SEPARATOR : (byte)loggingSeparator.charAt(0);
     }
 
     public static final String DEBUG_FILE = System.getProperty(DEBUG_FILE_PROPERTY);
+    public static final String APPENDER_CLASS = System.getProperty(APPENDER_CLASS_PROPERTY);
     public static final boolean TIME_MESSAGES = Boolean.getBoolean(TIME_MESSAGES_PROPERTY);
     public static final boolean FORCE_WRITES = Boolean.getBoolean(FORCE_WRITES_MESSAGES_PROPERTY);
 
@@ -187,20 +210,23 @@ public class CommonConfiguration
     public static final long DEFAULT_SENDING_TIME_WINDOW = MINUTES.toMillis(2);
     public static final int DEFAULT_HEARTBEAT_INTERVAL_IN_S = 10;
 
-    public static final long DEFAULT_REPLY_TIMEOUT_IN_MS = 3_000L;
+    public static final long DEFAULT_REPLY_TIMEOUT_IN_MS = 10_000L;
     public static final long DEFAULT_HISTOGRAM_POLL_PERIOD_IN_MS = MINUTES.toMillis(1);
 
     public static final int DEFAULT_INBOUND_LIBRARY_STREAM = 1;
     public static final int DEFAULT_OUTBOUND_LIBRARY_STREAM = 2;
 
+    public static final boolean RUNNING_ON_WINDOWS = System.getProperty("os.name").startsWith("Windows");
+
     private long reasonableTransmissionTimeInMs = DEFAULT_REASONABLE_TRANSMISSION_TIME_IN_MS;
     private boolean printAeronStreamIdentifiers = DEFAULT_PRINT_AERON_STREAM_IDENTIFIERS;
     private Clock clock = Clock.systemNanoTime();
+    private EpochNanoClock epochNanoClock = new OffsetEpochNanoClock();
     private boolean printErrorMessages = true;
-    private IdleStrategy monitoringThreadIdleStrategy = new BackoffIdleStrategy(1, 1, 1000, 1_000_000);
+    private ErrorConsumer customErrorConsumer;
+    private IdleStrategy monitoringThreadIdleStrategy = backoffIdleStrategy();
     private long sendingTimeWindowInMs = DEFAULT_SENDING_TIME_WINDOW;
     private SessionIdStrategy sessionIdStrategy = SessionIdStrategy.senderAndTarget();
-    private AuthenticationStrategy authenticationStrategy = AuthenticationStrategy.none();
     private MessageValidationStrategy messageValidationStrategy = MessageValidationStrategy.none();
     private SessionCustomisationStrategy sessionCustomisationStrategy = SessionCustomisationStrategy.none();
     private int monitoringBuffersLength = getInteger(
@@ -221,6 +247,10 @@ public class CommonConfiguration
     private String agentNamePrefix = DEFAULT_NAME_PREFIX;
     private int inboundLibraryStream = DEFAULT_INBOUND_LIBRARY_STREAM;
     private int outboundLibraryStream = DEFAULT_OUTBOUND_LIBRARY_STREAM;
+    private boolean gracefulShutdown = true;
+    private boolean validateCompIdsOnEveryMessage = true;
+    private boolean validateTimeStrictly = true;
+    private EpochFractionFormat sessionEpochFractionFormat = EpochFractionFormat.MILLISECONDS;
 
     private final AtomicBoolean isConcluded = new AtomicBoolean(false);
 
@@ -271,20 +301,6 @@ public class CommonConfiguration
     public CommonConfiguration sessionIdStrategy(final SessionIdStrategy sessionIdStrategy)
     {
         this.sessionIdStrategy = sessionIdStrategy;
-        return this;
-    }
-
-    /**
-     * Sets the authentication strategy of the FIX Library, see {@link AuthenticationStrategy} for details.
-     * <p>
-     * This only needs to be set if this FIX Library is the acceptor library.
-     *
-     * @param authenticationStrategy the authentication strategy to use.
-     * @return this
-     */
-    public CommonConfiguration authenticationStrategy(final AuthenticationStrategy authenticationStrategy)
-    {
-        this.authenticationStrategy = authenticationStrategy;
         return this;
     }
 
@@ -370,6 +386,12 @@ public class CommonConfiguration
         return this;
     }
 
+    public CommonConfiguration customErrorConsumer(final ErrorConsumer customErrorConsumer)
+    {
+        this.customErrorConsumer = customErrorConsumer;
+        return this;
+    }
+
     /**
      * Sets the idle strategy for the Error Printer thread.
      *
@@ -425,7 +447,7 @@ public class CommonConfiguration
     /**
      * Sets the session's encoding buffer size. The session buffer is a buffer used by each Session to encode messages
      * via
-     * {@link uk.co.real_logic.artio.session.Session#send(uk.co.real_logic.artio.builder.Encoder)}.
+     * {@link uk.co.real_logic.artio.session.Session#trySend(uk.co.real_logic.artio.builder.Encoder)}.
      *
      * This is also used as the size of buffer for messages that are sent by the Session management system itself.
      *
@@ -480,6 +502,18 @@ public class CommonConfiguration
         return this;
     }
 
+    /**
+     * Sets the clock used for producing requestTimestamp fields on iLink3 messages.
+     *
+     * @param epochNanoClock the clock used for producing requestTimestamp fields on iLink3 messages.
+     * @return this
+     */
+    public CommonConfiguration epochNanoClock(final EpochNanoClock epochNanoClock)
+    {
+        this.epochNanoClock = epochNanoClock;
+        return this;
+    }
+
     public CommonConfiguration inboundLibraryStream(final int inboundLibraryStream)
     {
         this.inboundLibraryStream = inboundLibraryStream;
@@ -492,6 +526,73 @@ public class CommonConfiguration
         return this;
     }
 
+    /**
+     * Sets factory for threads such as framer, archivingRunner, etc in EngineScheduler
+     * @param threadFactory factory for custom thread creating
+     * @return this
+     */
+    public CommonConfiguration threadFactory(final ThreadFactory threadFactory)
+    {
+        this.threadFactory = threadFactory;
+        return this;
+    }
+
+    /**
+     * Set to false to enable simulation of a non-graceful shutdown. Should only be used for testing.
+     *
+     * @param gracefulShutdown false to enable simulation of a non-graceful shutdown.
+     * @return this
+     */
+    public CommonConfiguration gracefulShutdown(final boolean gracefulShutdown)
+    {
+        this.gracefulShutdown = gracefulShutdown;
+        return this;
+    }
+
+    /**
+     * Set to true in order to check that the sender, target comp ids (including sub and location) are the same on
+     * every message as the logon message. This can be disabled for performance reasons.
+     *
+     * @param validateCompIdsOnEveryMessage true to validate comp ids
+     * @return this
+     */
+    public CommonConfiguration validateCompIdsOnEveryMessage(final boolean validateCompIdsOnEveryMessage)
+    {
+        this.validateCompIdsOnEveryMessage = validateCompIdsOnEveryMessage;
+        return this;
+    }
+
+    /**
+     * Set to true in order to validate that time from sender corresponds to FIX time format.
+     * See http://fixwiki.org/fixwiki/UTCTimestampDataType for details.
+     *
+     * @param validateTimeStrictly true to validate time matches format
+     * @return this
+     */
+    public CommonConfiguration validateTimeStrictly(final boolean validateTimeStrictly)
+    {
+        this.validateTimeStrictly = validateTimeStrictly;
+        return this;
+    }
+
+    /**
+     * Sets the time precision that the the session logic uses to encode time stamps.
+     *
+     * @param sessionEpochFractionFormat the format to use.
+     * @return this
+     */
+    public CommonConfiguration sessionEpochFractionFormat(final EpochFractionFormat sessionEpochFractionFormat)
+    {
+        Verify.notNull(sessionEpochFractionFormat, "sessionEpochFractionFormat");
+        this.sessionEpochFractionFormat = sessionEpochFractionFormat;
+        return this;
+    }
+
+    public boolean gracefulShutdown()
+    {
+        return gracefulShutdown;
+    }
+
     public Aeron.Context aeronContext()
     {
         return aeronContext;
@@ -502,6 +603,11 @@ public class CommonConfiguration
         return printErrorMessages;
     }
 
+    public ErrorConsumer customErrorConsumer()
+    {
+        return customErrorConsumer;
+    }
+
     public IdleStrategy monitoringThreadIdleStrategy()
     {
         return monitoringThreadIdleStrategy;
@@ -510,11 +616,6 @@ public class CommonConfiguration
     public SessionIdStrategy sessionIdStrategy()
     {
         return sessionIdStrategy;
-    }
-
-    public AuthenticationStrategy authenticationStrategy()
-    {
-        return authenticationStrategy;
     }
 
     public SessionCustomisationStrategy sessionCustomisationStrategy()
@@ -587,6 +688,21 @@ public class CommonConfiguration
         return printAeronStreamIdentifiers;
     }
 
+    public boolean validateCompIdsOnEveryMessage()
+    {
+        return validateCompIdsOnEveryMessage;
+    }
+
+    public boolean validateTimeStrictly()
+    {
+        return validateTimeStrictly;
+    }
+
+    public EpochFractionFormat sessionEpochFractionFormat()
+    {
+        return sessionEpochFractionFormat;
+    }
+
     protected void conclude(final String fixSuffix)
     {
         if (isConcluded.compareAndSet(false, true))
@@ -607,6 +723,11 @@ public class CommonConfiguration
         {
             throw new IllegalStateException(
                 "This configuration has already been concluded, are you trying to re-use it?");
+        }
+
+        if (threadFactory == null)
+        {
+            threadFactory = Thread::new;
         }
     }
 
@@ -641,6 +762,11 @@ public class CommonConfiguration
         return clock;
     }
 
+    public EpochNanoClock epochNanoClock()
+    {
+        return epochNanoClock;
+    }
+
     public int inboundLibraryStream()
     {
         return inboundLibraryStream;
@@ -649,5 +775,10 @@ public class CommonConfiguration
     public int outboundLibraryStream()
     {
         return outboundLibraryStream;
+    }
+
+    public ThreadFactory threadFactory()
+    {
+        return threadFactory;
     }
 }

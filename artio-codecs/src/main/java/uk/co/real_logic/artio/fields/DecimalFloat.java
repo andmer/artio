@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd., Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited., Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,7 +15,13 @@
  */
 package uk.co.real_logic.artio.fields;
 
-import java.math.BigDecimal;
+import uk.co.real_logic.artio.dictionary.generation.CodecUtil;
+import uk.co.real_logic.artio.util.PowerOf10;
+import uk.co.real_logic.artio.util.float_parsing.CharSequenceCharReader;
+import uk.co.real_logic.artio.util.float_parsing.DecimalFloatParser;
+
+import static uk.co.real_logic.artio.util.PowerOf10.HIGHEST_POWER_OF_TEN;
+import static uk.co.real_logic.artio.util.PowerOf10.POWERS_OF_TEN;
 
 /**
  * Fix float data type. Floats are used for a variety of things, including price.
@@ -57,16 +63,8 @@ public final class DecimalFloat implements Comparable<DecimalFloat>
     public static final DecimalFloat MIN_VALUE = new DecimalFloat(VALUE_MIN_VAL, 0);
     public static final DecimalFloat MAX_VALUE = new DecimalFloat(VALUE_MAX_VAL, 0);
     public static final DecimalFloat ZERO = new DecimalFloat();
-    public static final DecimalFloat NAN = getNaN();
-    public static final DecimalFloat MISSING_FLOAT = ZERO;
-
-    private static final int HIGHEST_POWER_OF_TEN = 18;
-    private static final long[] POWERS_OF_TEN = new long[]
-        {1L, 10L, 100L, 1_000L, 10_000L, 100_000L, 1_000_000L, 10_000_000L,
-        100_000_000L, 1_000_000_000L, 10_000_000_000L, 100_000_000_000L,
-        1_000_000_000_000L, 10_000_000_000_000L, 100_000_000_000_000L,
-        1_000_000_000_000_000L, 10_000_000_000_000_000L, 100_000_000_000_000_000L,
-        1_000_000_000_000_000_000L, Long.MAX_VALUE};
+    public static final DecimalFloat NAN = newNaNValue();
+    public static final DecimalFloat MISSING_FLOAT = NAN;
 
     // FRACTION_LOWER_THRESHOLD and FRACTION_UPPER_THRESHOLD are used when converting
     // the fractional part of a double to ensure that discretisation errors are corrected.
@@ -95,9 +93,15 @@ public final class DecimalFloat implements Comparable<DecimalFloat>
         setAndNormalise(value, scale);
     }
 
+    /**
+     * Resets the encoder to the NAN value. This can checked using the {@link #isNaNValue()} method.
+     */
     public void reset()
     {
-        setAndNormalise(0, 0);
+        this.value = VALUE_NAN_VALUE;
+        this.scale = SCALE_NAN_VALUE;
+
+        // Deliberately doesn't normalise, as that validates the arithmetic range.
     }
 
     public long value()
@@ -182,69 +186,68 @@ public final class DecimalFloat implements Comparable<DecimalFloat>
         return 31 * result + scale;
     }
 
+    public void appendTo(final StringBuilder builder)
+    {
+        CodecUtil.appendFloat(builder, this);
+    }
+
     public String toString()
     {
-        final BigDecimal bigDecimal = BigDecimal.valueOf(value, scale);
-        return bigDecimal.toPlainString();
+        final StringBuilder builder = new StringBuilder();
+        appendTo(builder);
+        return builder.toString();
+    }
+
+    public DecimalFloat negate()
+    {
+        this.value *= -1;
+        return this;
+    }
+
+    public DecimalFloat copy()
+    {
+        return new DecimalFloat(value, scale);
     }
 
     public int compareTo(final DecimalFloat other)
     {
         final long value = this.value;
+        final int scale = this.scale;
+
         final long otherValue = other.value;
+        final int otherScale = other.scale;
 
-        final boolean isPositive = value >= 0;
-        final int negativeComparison = Boolean.compare(isPositive, otherValue >= 0);
-        if (negativeComparison != 0)
+        final long decimalPointDivisor = PowerOf10.pow10(scale);
+        final long otherDecimalPointDivisor = PowerOf10.pow10(otherScale);
+
+        final long valueBeforeDecimalPoint = value / decimalPointDivisor;
+        final long otherValueBeforeDecimalPoint = otherValue / otherDecimalPointDivisor;
+
+        final int beforeDecimalPointComparison = Long.compare(valueBeforeDecimalPoint, otherValueBeforeDecimalPoint);
+
+        if (beforeDecimalPointComparison != 0)
         {
-            return negativeComparison;
+            // Can be determined using just the long value before decimal point
+            return beforeDecimalPointComparison;
         }
 
-        final int digitsBeforeDecimalPoint = digitsBeforeDecimalPoint(value);
-        final int otherDigitsBeforeDecimalPoint = other.digitsBeforeDecimalPoint(otherValue);
+        // values after decimal point, but has removed scale entirely
+        long valueAfterDecimalPoint = (value % decimalPointDivisor);
+        long otherValueAfterDecimalPoint = (otherValue % otherDecimalPointDivisor);
 
-        final int digitComparison = Integer.compare(digitsBeforeDecimalPoint, otherDigitsBeforeDecimalPoint);
-        if (digitComparison == 0)
+        // re-normalise with scales by multiplying the lower scale number up
+        if (scale > otherScale)
         {
-            return Long.compare(value, otherValue);
-        }
-        else if (value == 0)
-        {
-            return -1;
-        }
-        else if (otherValue == 0)
-        {
-            return 1;
+            final int differenceInScale = scale - otherScale;
+            otherValueAfterDecimalPoint *= PowerOf10.pow10(differenceInScale);
         }
         else
         {
-            return isPositive ? digitComparison : -1 * digitComparison;
+            final int differenceInScale = otherScale - scale;
+            valueAfterDecimalPoint *= PowerOf10.pow10(differenceInScale);
         }
-    }
 
-    private int digitsBeforeDecimalPoint(final long value)
-    {
-        final long absValue = Math.abs(value);
-        final int digitsInvalue = absValue < 10 ? 1 :
-            absValue < 100L ? 2 :
-            absValue < 1000L ? 3 :
-            absValue < 10000L ? 4 :
-            absValue < 100000L ? 5 :
-            absValue < 1000000L ? 6 :
-            absValue < 10000000L ? 7 :
-            absValue < 100000000L ? 8 :
-            absValue < 1000000000L ? 9 :
-            absValue < 10000000000L ? 10 :
-            absValue < 100000000000L ? 11 :
-            absValue < 1000000000000L ? 12 :
-            absValue < 10000000000000L ? 13 :
-            absValue < 100000000000000L ? 14 :
-            absValue < 1000000000000000L ? 15 :
-            absValue < 10000000000000000L ? 16 :
-            absValue < 100000000000000000L ? 17 :
-            absValue < 1000000000000000000L ? 18 :
-            19;
-        return digitsInvalue - scale;
+        return Long.compare(valueAfterDecimalPoint, otherValueAfterDecimalPoint);
     }
 
     public double toDouble()
@@ -310,12 +313,27 @@ public final class DecimalFloat implements Comparable<DecimalFloat>
         return true;
     }
 
+    public DecimalFloat fromString(final CharSequence string)
+    {
+        return fromString(string, 0, string.length());
+    }
+
+    public DecimalFloat fromString(final CharSequence string, final int start, final int length)
+    {
+        return DecimalFloatParser.extract(this, CharSequenceCharReader.INSTANCE, string, start, length);
+    }
+
     public boolean isNaNValue()
+    {
+        return isNaNValue(value, scale);
+    }
+
+    public static boolean isNaNValue(final long value, final int scale)
     {
         return value == VALUE_NAN_VALUE && scale == SCALE_NAN_VALUE;
     }
 
-    private static DecimalFloat getNaN()
+    public static DecimalFloat newNaNValue()
     {
         final DecimalFloat nanFloat = new DecimalFloat();
         nanFloat.value = VALUE_NAN_VALUE;

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited., Monotonic Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,19 +15,20 @@
  */
 package uk.co.real_logic.artio.dictionary.generation;
 
+import org.agrona.AsciiSequenceView;
 import org.agrona.MutableDirectBuffer;
 import org.agrona.collections.IntHashSet;
 import org.agrona.generation.OutputManager;
 import uk.co.real_logic.artio.EncodingException;
 import uk.co.real_logic.artio.dictionary.CharArraySet;
-import uk.co.real_logic.artio.dictionary.StandardFixConstants;
+import uk.co.real_logic.artio.dictionary.CharArrayWrapper;
+import uk.co.real_logic.artio.dictionary.SessionConstants;
 import uk.co.real_logic.artio.dictionary.ir.*;
 import uk.co.real_logic.artio.dictionary.ir.Entry.Element;
 import uk.co.real_logic.artio.fields.DecimalFloat;
 import uk.co.real_logic.artio.fields.LocalMktDateEncoder;
 import uk.co.real_logic.artio.fields.UtcTimestampEncoder;
 import uk.co.real_logic.artio.util.AsciiBuffer;
-import org.agrona.AsciiSequenceView;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
 import java.io.IOException;
@@ -35,10 +36,13 @@ import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.Predicate;
+import java.util.regex.Pattern;
 import java.util.stream.IntStream;
 
+import static java.util.regex.Pattern.MULTILINE;
 import static java.util.stream.Collectors.joining;
 import static uk.co.real_logic.artio.dictionary.generation.AggregateType.*;
 import static uk.co.real_logic.artio.dictionary.generation.GenerationUtil.importFor;
@@ -51,9 +55,11 @@ public abstract class Generator
     public static final String BEGIN_STRING = "BeginString";
     public static final String BODY_LENGTH = "BodyLength";
 
-    public static final String EXPAND_INDENT = ".toString().replace(\"\\n\", \"\\n  \")";
     public static final String CODEC_VALIDATION_ENABLED = "CODEC_VALIDATION_ENABLED";
     public static final String CODEC_REJECT_UNKNOWN_FIELD_ENABLED = "CODEC_REJECT_UNKNOWN_FIELD_ENABLED";
+    public static final String RUNTIME_REJECT_UNKNOWN_ENUM_VALUE_PROPERTY = "CODEC_REJECT_UNKNOWN_ENUM_VALUE_ENABLED";
+    public static final Pattern NEWLINE = Pattern.compile("^", MULTILINE);
+    final String codecRejectUnknownEnumValueEnabled;
     public static final String MESSAGE_FIELDS = "messageFields";
 
     protected String commonCompoundImports(final String form, final boolean headerWrapsTrailer,
@@ -83,26 +89,34 @@ public abstract class Generator
         "import %1$s.Trailer%2$s;\n";
 
     protected final Dictionary dictionary;
-    protected final String builderPackage;
-    private String builderCommonPackage;
+    protected final String thisPackage;
+    private final String commonPackage;
     protected final OutputManager outputManager;
     protected final Class<?> validationClass;
-    protected final Class<?> rejectUnknownClass;
+    protected final Class<?> rejectUnknownFieldClass;
+    private final Class<?> rejectUnknownEnumValueClass;
+    protected final boolean flyweightsEnabled;
 
     protected Generator(
         final Dictionary dictionary,
-        final String builderPackage,
-        final String builderCommonPackage,
+        final String thisPackage,
+        final String commonPackage,
         final OutputManager outputManager,
         final Class<?> validationClass,
-        final Class<?> rejectUnknownClass)
+        final Class<?> rejectUnknownFieldClass,
+        final Class<?> rejectUnknownEnumValueClass,
+        final boolean flyweightsEnabled,
+        final String codecRejectUnknownEnumValueEnabled)
     {
         this.dictionary = dictionary;
-        this.builderPackage = builderPackage;
-        this.builderCommonPackage = builderCommonPackage;
+        this.thisPackage = thisPackage;
+        this.commonPackage = commonPackage;
         this.outputManager = outputManager;
         this.validationClass = validationClass;
-        this.rejectUnknownClass = rejectUnknownClass;
+        this.rejectUnknownFieldClass = rejectUnknownFieldClass;
+        this.rejectUnknownEnumValueClass = rejectUnknownEnumValueClass;
+        this.flyweightsEnabled = flyweightsEnabled;
+        this.codecRejectUnknownEnumValueEnabled = codecRejectUnknownEnumValueEnabled;
     }
 
     public void generate()
@@ -120,13 +134,14 @@ public abstract class Generator
     protected void generateImports(
         final String compoundSuffix,
         final AggregateType type,
-        final Writer out) throws IOException
+        final Writer out,
+        final Class<?>... extraImports) throws IOException
     {
         out
             .append(importFor(MutableDirectBuffer.class))
             .append(importFor(AsciiSequenceView.class))
             .append(importStaticFor(CodecUtil.class))
-            .append(importStaticFor(StandardFixConstants.class))
+            .append(importStaticFor(SessionConstants.class))
             .append(importFor(topType(MESSAGE)));
 
         if (topType(GROUP) != topType(MESSAGE))
@@ -134,8 +149,7 @@ public abstract class Generator
             out.append(importFor(topType(GROUP)));
         }
 
-        out
-            .append(type == MESSAGE ? String.format(COMMON_COMPOUND_IMPORTS, builderPackage, compoundSuffix) : "")
+        out .append(type == MESSAGE ? String.format(COMMON_COMPOUND_IMPORTS, thisPackage, compoundSuffix) : "")
             .append(importFor(DecimalFloat.class))
             .append(importFor(MutableAsciiBuffer.class))
             .append(importFor(AsciiBuffer.class))
@@ -147,12 +161,21 @@ public abstract class Generator
             .append(importFor(IntHashSet.class))
             .append(importFor(IntHashSet.IntIterator.class))
             .append(importFor(EncodingException.class))
-            .append(importStaticFor(StandardCharsets.class, "US_ASCII"))
-            .append(importStaticFor(validationClass, CODEC_VALIDATION_ENABLED))
-            .append(importStaticFor(rejectUnknownClass, CODEC_REJECT_UNKNOWN_FIELD_ENABLED));
-        if (!builderPackage.equals(builderCommonPackage) && !builderCommonPackage.isEmpty())
+            .append(importFor(CharArrayWrapper.class));
+
+        for (final Class<?> extraImport : extraImports)
         {
-            out.append(importFor(builderCommonPackage + ".*"));
+            out.append(importFor(extraImport));
+        }
+
+        out .append(importStaticFor(StandardCharsets.class, "US_ASCII"))
+            .append(importStaticFor(validationClass, CODEC_VALIDATION_ENABLED))
+            .append(importStaticFor(rejectUnknownFieldClass, CODEC_REJECT_UNKNOWN_FIELD_ENABLED))
+            .append(importStaticFor(rejectUnknownEnumValueClass, RUNTIME_REJECT_UNKNOWN_ENUM_VALUE_PROPERTY));
+
+        if (!thisPackage.equals(commonPackage) && !commonPackage.isEmpty())
+        {
+            out.append(importFor(commonPackage + ".*"));
         }
     }
 
@@ -295,14 +318,14 @@ public abstract class Generator
                 return resetRequiredFloat(name);
 
             case CHAR:
-                return resetFieldValue(name, "MISSING_CHAR");
+                return resetFieldValue(field, "MISSING_CHAR");
 
             case DATA:
             case XMLDATA:
-                return resetFieldValue(name, "null");
+                return resetFieldValue(field, "null");
 
             case BOOLEAN:
-                return resetFieldValue(name, "false");
+                return resetFieldValue(field, "false");
 
             case STRING:
             case MULTIPLEVALUESTRING:
@@ -418,22 +441,16 @@ public abstract class Generator
             nameOfResetMethod(name));
     }
 
-    protected String resetByMethod(final String name)
+    protected String resetFieldValue(final Field field, final String resetValue)
     {
-        return String.format(
-            "    public void %2$s()\n" +
-            "    {\n" +
-            "        %1$s.reset();\n" +
-            "    }\n\n",
-            formatPropertyName(name),
-            nameOfResetMethod(name));
-    }
+        final String name = field.name();
+        final boolean hasLengthField = field.type().hasLengthField(flyweightsEnabled);
+        final String lengthReset = hasLengthField ? "        %2$sLength = 0;\n" : "";
 
-    protected String resetFieldValue(final String name, final String resetValue)
-    {
         return String.format(
             "    public void %1$s()\n" +
             "    {\n" +
+            lengthReset +
             "        %2$s = %3$s;\n" +
             "    }\n\n",
             nameOfResetMethod(name),
@@ -441,58 +458,59 @@ public abstract class Generator
             resetValue);
     }
 
-    protected String toString(final Aggregate aggregate, final boolean hasCommonCompounds)
+    protected String generateAppendTo(final Aggregate aggregate, final boolean hasCommonCompounds)
     {
         final String entriesToString = aggregate
             .entries()
             .stream()
-            .map(this::entryToString)
-            .collect(joining(" + \n"));
+            .map(this::generateEntryAppendTo)
+            .collect(joining("\n"));
 
-        final String prefix = !hasCommonCompounds ?
-            "" : "\"  \\\"header\\\": \" + header" + EXPAND_INDENT + " + \"\\n\" + ";
-
-        final String suffix;
-        final String parameters;
-        if (aggregate instanceof Group)
+        final String prefix;
+        if (hasCommonCompounds)
         {
-            suffix = toStringGroupSuffix();
-
-            parameters = toStringGroupParameters();
+            prefix =
+                "    builder.append(\"  \\\"header\\\": \");\n" +
+                "    header.appendTo(builder, level + 1);\n" +
+                "    builder.append(\"\\n\");\n";
         }
         else
         {
-            suffix = "";
-            parameters = "";
+            prefix = "";
         }
 
         return String.format(
-            "    public String toString(%5$s)\n" +
+            "    public String toString()\n" +
             "    {\n" +
-            "        String entries = %1$s\n" +
-            "%2$s;\n\n" +
-            "        entries = \"{\\n  \\\"MessageName\\\": \\\"%4$s\\\",\\n\" + entries + \"}\";\n" +
+            "        return appendTo(new StringBuilder()).toString();\n" +
+            "    }\n\n" +
+            "    public StringBuilder appendTo(final StringBuilder builder)\n" +
+            "    {\n" +
+            "        return appendTo(builder, 1);\n" +
+            "    }\n\n" +
+            "    public StringBuilder appendTo(final StringBuilder builder, final int level)\n" +
+            "    {\n" +
+            "        builder.append(\"{\\n\");" +
+            "        indent(builder, level);\n" +
+            "        builder.append(\"\\\"MessageName\\\": \\\"%1$s\\\",\\n\");\n" +
+            "%2$s" +
             "%3$s" +
-            "        return entries;\n" +
+            "        indent(builder, level - 1);\n" +
+            "        builder.append(\"}\");\n" +
+            "        return builder;\n" +
             "    }\n\n",
-            prefix,
-            entriesToString,
-            suffix,
             aggregate.name(),
-            parameters);
+            prefix,
+            entriesToString);
     }
 
-    protected abstract String toStringGroupParameters();
-
-    protected abstract String toStringGroupSuffix();
-
-    protected String entryToString(final Entry entry)
+    protected String generateEntryAppendTo(final Entry entry)
     {
         //"  \"OnBehalfOfCompID\": \"abc\",\n" +
 
         if (isBodyLength(entry))
         {
-            return "\"\"";
+            return "";
         }
 
         final Element element = entry.element();
@@ -500,32 +518,49 @@ public abstract class Generator
         if (element instanceof Field)
         {
             final Field field = (Field)element;
-            final String value = fieldToString(field);
+            final String value = fieldAppendTo(field);
 
-            final String formatter = String.format(
-                "String.format(\"  \\\"%s\\\": \\\"%%s\\\",\\n\", %s)",
+            final String fieldAppender = String.format(
+                "        indent(builder, level);\n" +
+                "        builder.append(\"\\\"%1$s\\\": \\\"\");\n" +
+                "        %2$s;\n" +
+                "        builder.append(\"\\\",\\n\");\n",
                 name,
                 value);
 
-            final boolean hasFlag = toStringChecksHasGetter(entry, field);
-            return "             " +
-                (hasFlag ? String.format("(has%s() ? %s : \"\")", name, formatter) : formatter);
+            if (appendToChecksHasGetter(entry, field))
+            {
+                final String indentedFieldAppender = NEWLINE
+                    .matcher(fieldAppender)
+                    .replaceAll("    ");
+                return String.format(
+                    "        if (has%1$s())\n" +
+                        "        {\n" +
+                        "%2$s" +
+                        "        }\n",
+                    name,
+                    indentedFieldAppender);
+            }
+            else
+            {
+                return fieldAppender;
+            }
         }
         else if (element instanceof Group)
         {
-            return groupEntryToString((Group)element, name);
+            return groupEntryAppendTo((Group)element, name);
         }
         else if (element instanceof Component)
         {
-            return componentToString((Component)element);
+            return componentAppendTo((Component)element);
         }
 
-        return "\"\"";
+        return "";
     }
 
-    protected abstract boolean toStringChecksHasGetter(Entry entry, Field field);
+    protected abstract boolean appendToChecksHasGetter(Entry entry, Field field);
 
-    protected abstract String groupEntryToString(Group element, String name);
+    protected abstract String groupEntryAppendTo(Group element, String name);
 
     protected abstract boolean hasFlag(Entry entry, Field field);
 
@@ -539,9 +574,9 @@ public abstract class Generator
             name);
     }
 
-    protected abstract String componentToString(Component component);
+    protected abstract String componentAppendTo(Component component);
 
-    protected String fieldToString(final Field field)
+    protected String fieldAppendTo(final Field field)
     {
         final String fieldName = formatPropertyName(field.name());
         switch (field.type())
@@ -554,6 +589,9 @@ public abstract class Generator
             case EXCHANGE:
             case COUNTRY:
             case LANGUAGE:
+                return stringAppendTo(fieldName);
+
+            // Call the getter for other choices in order to ensure that the flyweight version is populated
             case UTCTIMEONLY:
             case UTCDATEONLY:
             case UTCTIMESTAMP:
@@ -561,16 +599,38 @@ public abstract class Generator
             case MONTHYEAR:
             case TZTIMEONLY:
             case TZTIMESTAMP:
-                return stringToString(fieldName);
+                return timeAppendTo(fieldName);
+
+            case FLOAT:
+            case PRICE:
+            case PRICEOFFSET:
+            case QTY:
+            case PERCENTAGE:
+            case AMT:
+                if (flyweightsEnabled)
+                {
+                    return String.format("%1$s().appendTo(builder)", fieldName);
+                }
+
+                return String.format("%1$s.appendTo(builder)", fieldName);
 
             case DATA:
             case XMLDATA:
-                return String.format("Arrays.toString(%s)", fieldName);
+                return dataAppendTo(field, fieldName);
 
             default:
-                return fieldName;
+                if (flyweightsEnabled)
+                {
+                    return String.format("builder.append(%1$s())", fieldName);
+                }
+
+                return String.format("builder.append(%1$s)", fieldName);
         }
     }
+
+    protected abstract String timeAppendTo(String fieldName);
+
+    protected abstract String dataAppendTo(Field field, String fieldName);
 
     protected boolean isCheckSum(final Entry entry)
     {
@@ -597,7 +657,28 @@ public abstract class Generator
         return BODY_LENGTH.equals(name);
     }
 
-    protected abstract String stringToString(String fieldName);
+    void generateOptionalSessionFieldsSupportedMethods(
+        final List<String> optionalFields, final Set<String> missingOptionalFields, final Writer out)
+        throws IOException
+    {
+        if (optionalFields != null)
+        {
+            for (final String optionalField : optionalFields)
+            {
+                final boolean inDictionary = !missingOptionalFields.contains(optionalField);
+
+                out.append(String.format(
+                    "    public boolean supports%1$s()\n" +
+                    "    {\n" +
+                    "        return %2$s;\n" +
+                    "    }\n\n",
+                    optionalField,
+                    inDictionary));
+            }
+        }
+    }
+
+    protected abstract String stringAppendTo(String fieldName);
 
     protected String indent(final int times, final String suffix)
     {

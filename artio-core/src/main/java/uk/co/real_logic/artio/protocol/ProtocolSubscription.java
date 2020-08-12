@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,9 +19,9 @@ import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import uk.co.real_logic.artio.DebugLogger;
-import uk.co.real_logic.artio.messages.DisconnectDecoder;
-import uk.co.real_logic.artio.messages.FixMessageDecoder;
-import uk.co.real_logic.artio.messages.MessageHeaderDecoder;
+import uk.co.real_logic.artio.engine.framer.MessageTypeExtractor;
+import uk.co.real_logic.artio.messages.*;
+import uk.co.real_logic.artio.util.CharFormatter;
 
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
 import static uk.co.real_logic.artio.LogTag.FIX_CONNECTION;
@@ -31,9 +31,12 @@ public final class ProtocolSubscription implements ControlledFragmentHandler
 {
     private static final Action UNKNOWN_TEMPLATE = null;
 
+    private final CharFormatter disconnectFormatter = new CharFormatter(
+        "FixSubscription Disconnect: %s [%s]%n");
     private final MessageHeaderDecoder messageHeader = new MessageHeaderDecoder();
     private final DisconnectDecoder disconnect = new DisconnectDecoder();
     private final FixMessageDecoder messageFrame = new FixMessageDecoder();
+    private final ILinkMessageDecoder iLinkMessage = new ILinkMessageDecoder();
 
     private final ProtocolHandler protocolHandler;
     private final Action defaultAction;
@@ -92,18 +95,42 @@ public final class ProtocolSubscription implements ControlledFragmentHandler
             {
                 return onDisconnect(buffer, offset, blockLength, version);
             }
+
+            case ILinkMessageDecoder.TEMPLATE_ID:
+            {
+                return onILinkMessage(buffer, offset, blockLength, version);
+            }
         }
 
         return defaultAction;
+    }
+
+    private Action onILinkMessage(
+        final DirectBuffer buffer, final int offset, final int blockLength, final int version)
+    {
+        iLinkMessage.wrap(buffer, offset, blockLength, version);
+        final long connectionId = iLinkMessage.connection();
+        return protocolHandler.onILinkMessage(
+            connectionId,
+            buffer,
+            offset + ILinkMessageDecoder.BLOCK_LENGTH);
     }
 
     private Action onDisconnect(
         final DirectBuffer buffer, final int offset, final int blockLength, final int version)
     {
         disconnect.wrap(buffer, offset, blockLength, version);
+        final int libraryId = disconnect.libraryId();
         final long connectionId = disconnect.connection();
-        DebugLogger.log(FIX_CONNECTION, "FixSubscription Disconnect: %d%n", connectionId);
-        return protocolHandler.onDisconnect(disconnect.libraryId(), connectionId, disconnect.reason());
+        final DisconnectReason reason = disconnect.reason();
+        if (DebugLogger.isEnabled(FIX_CONNECTION))
+        {
+            DebugLogger.log(FIX_CONNECTION, disconnectFormatter.clear()
+                .with(connectionId)
+                .with(reason.toString()));
+        }
+
+        return protocolHandler.onDisconnect(libraryId, connectionId, reason);
     }
 
     private Action onFixMessage(
@@ -114,19 +141,23 @@ public final class ProtocolSubscription implements ControlledFragmentHandler
         final long position)
     {
         messageFrame.wrap(buffer, offset, blockLength, version);
+        final int metaDataLength = messageFrame.skipMetaData();
+
         final int messageLength = messageFrame.bodyLength();
+        final long messageType = MessageTypeExtractor.getMessageType(messageFrame);
         return protocolHandler.onMessage(
             buffer,
-            offset + FRAME_SIZE,
+            offset + FRAME_SIZE + metaDataLength,
             messageLength,
             messageFrame.libraryId(),
             messageFrame.connection(),
             messageFrame.session(),
             messageFrame.sequenceIndex(),
-            messageFrame.messageType(),
+            messageType,
             messageFrame.timestamp(),
             messageFrame.status(),
             messageFrame.sequenceNumber(),
-            position);
+            position,
+            metaDataLength);
     }
 }

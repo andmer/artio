@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,6 +30,8 @@ public final class Field implements Element
     private Type type;
     private final List<Value> values;
 
+    private Field associatedLengthField;
+
     public static Field registerField(
         final Map<String, Field> nameToField,
         final int number,
@@ -52,6 +54,16 @@ public final class Field implements Element
     public Type type()
     {
         return type;
+    }
+
+    public Field associatedLengthField()
+    {
+        return associatedLengthField;
+    }
+
+    public void associatedLengthField(final Field associatedLengthField)
+    {
+        this.associatedLengthField = associatedLengthField;
     }
 
     public void type(final Type type)
@@ -99,70 +111,68 @@ public final class Field implements Element
     public enum Type
     {
         // int types
-        INT(false, true, false, false, false, false),
-        LENGTH(false, true, false, false, false, false),
-        SEQNUM(false, true, false, false, false, false),
-        NUMINGROUP(false, true, false, false, false, false),
-        DAYOFMONTH(false, true, false, false, false, false),
+        INT(false, true, false, false, false),
+        LENGTH(false, true, false, false, false),
+        SEQNUM(false, true, false, false, false),
+        NUMINGROUP(false, true, false, false, false),
+        DAYOFMONTH(false, true, false, false, false),
 
         // float types
-        FLOAT(false, false, true, false, false, false),
-        PRICE(false, false, true, false, false, false),
-        PRICEOFFSET(false, false, true, false, false, false),
-        QTY(false, false, true, false, false, false),
-        PERCENTAGE(false, false, true, false, false, false), // Percentage represented as a float
-        AMT(false, false, true, false, false, false), // Float amount, not to be confused with boolean Y/N AMT
+        FLOAT(false, false, true, false, false),
+        PRICE(false, false, true, false, false),
+        PRICEOFFSET(false, false, true, false, false),
+        QTY(false, false, true, false, false),
+        PERCENTAGE(false, false, true, false, false), // Percentage represented as a float
+        AMT(false, false, true, false, false), // Float amount, not to be confused with boolean Y/N AMT
 
-        CHAR(false, false, false, false, false, false),
-        MULTIPLECHARVALUE(true, false, false, true, true, true),
+        CHAR(false, false, false, false, true),
 
-        STRING(true, false, false, true, true, false),
-        MULTIPLEVALUESTRING(true, false, false, true, true, true),
-        MULTIPLESTRINGVALUE(true, false, false, true, true, true),
+        MULTIPLECHARVALUE(true, false, false, true, false),
+        STRING(true, false, false, false, false),
+        MULTIPLEVALUESTRING(true, false, false, true, false),
+        MULTIPLESTRINGVALUE(true, false, false, true, false),
 
-        CURRENCY(true, false, false, true, true, false), // String using ISO 4217 (3 chars)
-        EXCHANGE(true, false, false, true, true, false), // String using ISO 10383 (2 chars)
-        COUNTRY(true, false, false, true, true, false), // String using ISO 3166
-        LANGUAGE(true, false, false, true, true, false), // String using ISO 639-1 standard
+        CURRENCY(true, false, false, false, false), // String using ISO 4217 (3 chars)
+        EXCHANGE(true, false, false, false, false), // String using ISO 10383 (2 chars)
+        COUNTRY(true, false, false, false, false), // String using ISO 3166
+        LANGUAGE(true, false, false, false, false), // String using ISO 639-1 standard
 
         // NB: data doesn't have a length field because in specified
         // XML files it often comes along with a length field.
-        DATA(false, false, false, false, false, false),
-        XMLDATA(false, false, false, false, false, false),
+        DATA(false, false, false, false, false),
+        // Only used in 5.0sp1 or later.
+        XMLDATA(false, false, false, false, false),
 
         // Boolean types
-        BOOLEAN(false, false, false, false, false, false),
+        BOOLEAN(false, false, false, false, false),
 
-        UTCTIMESTAMP(true, false, false, true, true, false), // YYYYMMDD-HH:MM:SS or YYYYMMDD-HH:MM:SS.sss
-        UTCTIMEONLY(true, false, false, true, true, false), // HH:MM:SS or HH:MM:SS.sss
-        UTCDATEONLY(true, false, false, true, true, false), // YYYYMMDD
-        LOCALMKTDATE(true, false, false, true, true, false), // YYYYMMDD
-        MONTHYEAR(true, false, false, true, true, false), // YYYYMM or YYYYMMDD or YYYYMMWW
-        TZTIMEONLY(true, false, false, true, true, false), // HH:MM[:SS][Z [ + - hh[:mm]]]
-        TZTIMESTAMP(true, false, false, true, true, false); // YYYYMMDD-HH:MM:SS.sss*[Z [ + - hh[:mm]]]
+        UTCTIMESTAMP(true, false, false, false, false), // YYYYMMDD-HH:MM:SS or YYYYMMDD-HH:MM:SS.sss
+        UTCTIMEONLY(true, false, false, false, false), // HH:MM:SS or HH:MM:SS.sss
+        UTCDATEONLY(true, false, false, false, false), // YYYYMMDD
+        LOCALMKTDATE(true, false, false, false, false), // YYYYMMDD
+        MONTHYEAR(true, false, false, false, false), // YYYYMM or YYYYMMDD or YYYYMMWW
+        TZTIMEONLY(true, false, false, false, false), // HH:MM[:SS][Z [ + - hh[:mm]]]
+        TZTIMESTAMP(true, false, false, false, false); // YYYYMMDD-HH:MM:SS.sss*[Z [ + - hh[:mm]]]
 
         private final boolean isStringBased;
         private final boolean isIntBased;
         private final boolean isFloatBased;
-        private final boolean hasLengthField;
-        private final boolean hasOffsetField;
         private final boolean isMultiValue;
+        private final boolean isCharBased;
 
         Type(
             final boolean isStringBased,
             final boolean isIntBased,
             final boolean isFloatBased,
-            final boolean hasLengthField,
-            final boolean hasOffsetField,
-            final boolean isMultiValue
+            final boolean isMultiValue,
+            final boolean isCharBased
         )
         {
             this.isStringBased = isStringBased;
             this.isIntBased = isIntBased;
             this.isFloatBased = isFloatBased;
-            this.hasLengthField = hasLengthField;
-            this.hasOffsetField = hasOffsetField;
             this.isMultiValue = isMultiValue;
+            this.isCharBased = isCharBased;
         }
 
         public boolean isStringBased()
@@ -180,14 +190,26 @@ public final class Field implements Element
             return isFloatBased;
         }
 
-        public boolean hasLengthField()
+        public boolean isCharBased()
         {
-            return hasLengthField;
+            return isCharBased;
         }
 
-        public boolean hasOffsetField()
+        public boolean isDataBased()
         {
-            return hasOffsetField;
+            return this == DATA || this == XMLDATA;
+        }
+
+        public boolean hasOffsetField(final boolean flyweightsEnabled)
+        {
+            return hasLengthField(flyweightsEnabled) || (flyweightsEnabled && isDataBased());
+        }
+
+        public boolean hasLengthField(final boolean flyweightsEnabled)
+        {
+            return flyweightsEnabled ?
+                isStringBased() || isIntBased() || isFloatBased() :
+                isStringBased();
         }
 
         public boolean isMultiValue()

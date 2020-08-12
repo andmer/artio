@@ -20,7 +20,7 @@ import static uk.co.real_logic.artio.system_tests.SystemTestUtil.*;
 
 public class ResendRedundantResendRequestTest
 {
-    private int port = unusedPort();
+    private final int port = unusedPort();
 
     private ArchivingMediaDriver mediaDriver;
     private FixEngine engine;
@@ -35,7 +35,7 @@ public class ResendRedundantResendRequestTest
             .libraryAeronChannel(IPC_CHANNEL)
             .monitoringFile(acceptorMonitoringFile("engineCounters"))
             .logFileDir(ACCEPTOR_LOGS)
-            .sessionPersistenceStrategy(SessionPersistenceStrategy.alwaysIndexed())
+            .sessionPersistenceStrategy(SessionPersistenceStrategy.alwaysPersistent())
             .acceptedSessionSendRedundantResendRequests(resendRedundantResendRequest);
         engine = FixEngine.launch(config);
     }
@@ -71,7 +71,7 @@ public class ResendRedundantResendRequestTest
             // exchange test request / heartbeat
             final String testReqId = "thisIsATest";
             connection.msgSeqNum(5);
-            connection.testRequest(testReqId);
+            connection.sendTestRequest(testReqId);
             connection.readHeartbeat(testReqId);
 
             LockSupport.parkNanos(500);

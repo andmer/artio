@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -43,7 +43,7 @@ public final class MessageApiExamples
     public static final String SENDER_COMP_ID = "senderCompId";
     public static final String AERON_CHANNEL = "ipc:9999";
 
-    public static void main(final String[] args) throws Exception
+    public static void main(final String[] args)
     {
         // Static configuration lasts the duration of a FIX-Gateway instance
         final EngineConfiguration configuration = new EngineConfiguration()
@@ -54,16 +54,15 @@ public final class MessageApiExamples
 
         final AuthenticationStrategy authenticationStrategy = AuthenticationStrategy.of(validationStrategy);
 
-        configuration.messageValidationStrategy(validationStrategy)
-                     .authenticationStrategy(authenticationStrategy);
+        configuration.authenticationStrategy(authenticationStrategy)
+                     .messageValidationStrategy(validationStrategy);
 
         try (FixEngine ignore = FixEngine.launch(configuration))
         {
             final LibraryConfiguration libraryConfiguration = new LibraryConfiguration();
             libraryConfiguration
                 .libraryAeronChannels(singletonList(AERON_CHANNEL))
-                .messageValidationStrategy(validationStrategy)
-                .authenticationStrategy(authenticationStrategy);
+                .messageValidationStrategy(validationStrategy);
 
             try (FixLibrary library = SampleUtil.blockingConnect(libraryConfiguration))
             {
@@ -111,7 +110,7 @@ public final class MessageApiExamples
                     .transactTime(System.currentTimeMillis());
 
                 // Having encoded the message, you can send it to the exchange via the session object.
-                session.send(orderSingle);
+                session.trySend(orderSingle);
 
                 // If you want to produce multiple messages and rapidly fire them off then you just
                 // need to update the fields in question and the other remain the side as your previous
@@ -120,13 +119,13 @@ public final class MessageApiExamples
                     .price(price.set(2010, 2))
                     .orderQty(quantity.set(20, 0));
 
-                session.send(orderSingle);
+                session.trySend(orderSingle);
 
                 orderSingle
                     .price(price.set(2020, 2))
                     .orderQty(quantity.set(30, 0));
 
-                session.send(orderSingle);
+                session.trySend(orderSingle);
             }
         }
     }

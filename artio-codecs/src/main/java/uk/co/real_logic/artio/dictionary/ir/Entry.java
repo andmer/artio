@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,6 +15,7 @@
  */
 package uk.co.real_logic.artio.dictionary.ir;
 
+import org.agrona.LangUtil;
 import org.agrona.Verify;
 import org.agrona.generation.ResourceConsumer;
 
@@ -61,23 +62,30 @@ public final class Entry
     public void forEach(
         final ResourceConsumer<Field> withField,
         final ResourceConsumer<Group> withGroup,
-        final ResourceConsumer<Component> withComponent) throws IOException
+        final ResourceConsumer<Component> withComponent)
     {
-        if (element instanceof Field)
+        try
         {
-            withField.accept((Field)element);
+            if (element instanceof Field)
+            {
+                withField.accept((Field)element);
+            }
+            else if (element instanceof Group)
+            {
+                withGroup.accept((Group)element);
+            }
+            else if (element instanceof Component)
+            {
+                withComponent.accept((Component)element);
+            }
+            else
+            {
+                throw new IllegalStateException("Unknown element type: " + element);
+            }
         }
-        else if (element instanceof Group)
+        catch (final IOException e)
         {
-            withGroup.accept((Group)element);
-        }
-        else if (element instanceof Component)
-        {
-            withComponent.accept((Component)element);
-        }
-        else
-        {
-            throw new IllegalStateException("Unknown element type: " + element);
+            LangUtil.rethrowUnchecked(e);
         }
     }
 
@@ -146,6 +154,11 @@ public final class Entry
     public String name()
     {
         return element().name();
+    }
+
+    public int number()
+    {
+        return ((Field)element()).number();
     }
 
     public interface Element

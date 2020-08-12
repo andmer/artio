@@ -1,11 +1,11 @@
 /*
- * Copyright 2014-2018 Real Logic Ltd.
+ * Copyright 2014-2018 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,10 +16,8 @@
 package uk.co.real_logic.artio.engine;
 
 import org.agrona.collections.Long2ObjectHashMap;
-import org.agrona.concurrent.IdleStrategy;
-import org.agrona.concurrent.OneToOneConcurrentArrayQueue;
-
-import java.util.function.Consumer;
+import org.agrona.collections.LongHashSet;
+import org.agrona.concurrent.status.AtomicCounter;
 
 /**
  * For publishing the last sent sequence number to the replay system.
@@ -28,30 +26,24 @@ public class SenderSequenceNumbers
 {
     public static final int UNKNOWN_SESSION = -1;
 
-    private static final int CAPACITY = 10;
-
-    // Framer state
-    private final IdleStrategy framerIdleStrategy;
-
     // Written on Framer, Read on Indexer
-    private final OneToOneConcurrentArrayQueue<SenderSequenceNumber> queue
-        = new OneToOneConcurrentArrayQueue<>(CAPACITY);
+    private final ReplayerCommandQueue queue;
 
     // Indexer State
     private final Long2ObjectHashMap<SenderSequenceNumber> connectionIdToSequencePosition
         = new Long2ObjectHashMap<>();
-    private final Consumer<SenderSequenceNumber> onSenderSequenceNumberFunc
-        = this::onSenderSequenceNumber;
+    private final LongHashSet oldConnectionIds = new LongHashSet();
 
-    public SenderSequenceNumbers(final IdleStrategy framerIdleStrategy)
+    public SenderSequenceNumbers(final ReplayerCommandQueue queue)
     {
-        this.framerIdleStrategy = framerIdleStrategy;
+        this.queue = queue;
     }
 
     // Called on Framer Thread
-    public SenderSequenceNumber onNewSender(final long connectionId)
+    public SenderSequenceNumber onNewSender(final long connectionId, final AtomicCounter bytesInBuffer)
     {
-        final SenderSequenceNumber position = new SenderSequenceNumber(connectionId, this);
+        final SenderSequenceNumber position = new SenderSequenceNumber(
+            connectionId, bytesInBuffer, this);
         enqueue(position);
         return position;
     }
@@ -65,17 +57,7 @@ public class SenderSequenceNumbers
     // We receive the object to either add or remove it.
     private void enqueue(final SenderSequenceNumber senderSequenceNumber)
     {
-        while (!queue.offer(senderSequenceNumber))
-        {
-            framerIdleStrategy.idle();
-        }
-        framerIdleStrategy.reset();
-    }
-
-    // Called on Indexer Thread
-    public int poll()
-    {
-        return queue.drain(onSenderSequenceNumberFunc, CAPACITY);
+        queue.enqueue(senderSequenceNumber);
     }
 
     // Called on Indexer Thread
@@ -91,12 +73,29 @@ public class SenderSequenceNumbers
     }
 
     // Called on Indexer Thread
-    private void onSenderSequenceNumber(final SenderSequenceNumber senderSequenceNumber)
+    public AtomicCounter bytesInBufferCounter(final long connectionId)
+    {
+        final SenderSequenceNumber senderSequenceNumber = connectionIdToSequencePosition.get(connectionId);
+        return senderSequenceNumber == null ? null : senderSequenceNumber.bytesInBuffer();
+    }
+
+    // Called on Indexer Thread
+    public boolean hasDisconnected(final long connectionId)
+    {
+        return oldConnectionIds.contains(connectionId);
+    }
+
+    // Called on Indexer Thread
+    void onSenderSequenceNumber(final SenderSequenceNumber senderSequenceNumber)
     {
         final long connectionId = senderSequenceNumber.connectionId();
         if (connectionIdToSequencePosition.remove(connectionId) == null)
         {
             connectionIdToSequencePosition.put(connectionId, senderSequenceNumber);
+        }
+        else
+        {
+            oldConnectionIds.add(connectionId);
         }
     }
 }

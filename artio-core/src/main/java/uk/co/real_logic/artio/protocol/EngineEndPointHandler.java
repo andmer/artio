@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,8 @@ package uk.co.real_logic.artio.protocol;
 
 import io.aeron.logbuffer.ControlledFragmentHandler.Action;
 import io.aeron.logbuffer.Header;
+import org.agrona.DirectBuffer;
+import uk.co.real_logic.artio.dictionary.FixDictionary;
 import uk.co.real_logic.artio.messages.DisconnectReason;
 import uk.co.real_logic.artio.messages.SequenceNumberType;
 import uk.co.real_logic.artio.messages.SessionState;
@@ -49,6 +51,7 @@ public interface EngineEndPointHandler
         boolean enableLastMsgSeqNumProcessed,
         String username,
         String password,
+        Class<? extends FixDictionary> fixDictionary,
         int heartbeatIntervalInS,
         long correlationId,
         Header header);
@@ -77,4 +80,43 @@ public interface EngineEndPointHandler
         long correlationId,
         int lastReceivedSequenceNumber,
         int sequenceIndex);
+
+    Action onMidConnectionDisconnect(int libraryId, long correlationId);
+
+    Action onFollowerSessionRequest(
+        int libraryId,
+        long correlationId,
+        DirectBuffer srcBuffer,
+        int srcOffset,
+        int srcLength,
+        Header header);
+
+    Action onWriteMetaData(
+        int libraryId,
+        long sessionId,
+        long correlationId,
+        int metaDataOffset,
+        DirectBuffer srcBuffer,
+        int srcOffset,
+        int srcLength);
+
+    Action onReadMetaData(
+        int libraryId,
+        long sessionId,
+        long correlationId);
+
+    Action onReplayMessages(
+        int libraryId,
+        long sessionId,
+        long correlationId,
+        int replayFromSequenceNumber,
+        int replayFromSequenceIndex,
+        int replayToSequenceNumber,
+        int replayToSequenceIndex,
+        long latestReplyArrivalTimeInMs);
+
+    Action onInitiateILinkConnection(
+        int libraryId, int port, long correlationId,
+        boolean reestablishConnection, boolean useBackupHost,
+        String host, String accessKeyId, String backupHost);
 }

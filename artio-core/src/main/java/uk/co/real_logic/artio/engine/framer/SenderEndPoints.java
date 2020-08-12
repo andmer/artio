@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -72,7 +72,7 @@ class SenderEndPoints implements AutoCloseable, ControlledFragmentHandler
         }
     }
 
-    void onMessage(
+    boolean onMessage(
         final int libraryId,
         final long connectionId,
         final DirectBuffer buffer,
@@ -85,7 +85,10 @@ class SenderEndPoints implements AutoCloseable, ControlledFragmentHandler
         if (endPoint != null)
         {
             endPoint.onOutboundMessage(libraryId, buffer, offset, length, sequenceNumber, position, timeInMs);
+            return true;
         }
+
+        return false;
     }
 
     Action onReplayMessage(
@@ -105,16 +108,22 @@ class SenderEndPoints implements AutoCloseable, ControlledFragmentHandler
     }
 
     Action onSlowReplayMessage(
-        final long connectionId, final DirectBuffer buffer, final int offset, final int length, final long position)
+        final long connectionId,
+        final DirectBuffer buffer,
+        final int offset,
+        final int length,
+        final long position,
+        final int metaDataLength)
     {
         final SenderEndPoint endPoint = connectionIdToSenderEndpoint.get(connectionId);
         if (endPoint != null)
         {
-            return endPoint.onSlowReplayMessage(buffer, offset, length, timeInMs, position);
+            return endPoint.onSlowReplayMessage(buffer, offset, length, timeInMs, position, metaDataLength);
         }
         else
         {
-            logReplayError(connectionId, buffer, offset, length);
+            // We don't log the replay error at this point, as it will likely be a message that has already been
+            // attempted. This cannot be a slow endpoint anymore - it's a disconnected endpoint.
 
             return CONTINUE;
         }
@@ -123,7 +132,8 @@ class SenderEndPoints implements AutoCloseable, ControlledFragmentHandler
     private void logReplayError(final long connectionId, final DirectBuffer buffer, final int offset, final int length)
     {
         errorHandler.onError(new IllegalArgumentException(String.format(
-            "Failed to replay message on conn=%1$d [%2$s]",
+            "Failed to replay message on conn=%1$d [%2$s], this probably indicates the connection has disconnected " +
+            "from Artio whilst this message was in the process of being replayed",
             connectionId,
             buffer.getStringWithoutLengthUtf8(offset, length))));
     }
@@ -146,16 +156,21 @@ class SenderEndPoints implements AutoCloseable, ControlledFragmentHandler
         if (messageHeader.templateId() == FixMessageDecoder.TEMPLATE_ID)
         {
             offset += HEADER_LENGTH;
-            fixMessage.wrap(buffer, offset, messageHeader.blockLength(), messageHeader.version());
+            final int version = messageHeader.version();
+            fixMessage.wrap(buffer, offset, messageHeader.blockLength(), version);
             final long connectionId = fixMessage.connection();
 
             final SenderEndPoint senderEndPoint = connectionIdToSenderEndpoint.get(connectionId);
             if (senderEndPoint != null)
             {
+                final int metaDataLength = fixMessage.skipMetaData();
+
                 final int bodyLength = fixMessage.bodyLength();
                 final int libraryId = fixMessage.libraryId();
+                final int sequenceNumber = fixMessage.sequenceNumber();
                 return senderEndPoint.onSlowOutboundMessage(
-                    buffer, offset, length - HEADER_LENGTH, position, bodyLength, libraryId, timeInMs);
+                    buffer, offset, length - HEADER_LENGTH, position, bodyLength, libraryId, timeInMs,
+                    metaDataLength, sequenceNumber);
             }
         }
 

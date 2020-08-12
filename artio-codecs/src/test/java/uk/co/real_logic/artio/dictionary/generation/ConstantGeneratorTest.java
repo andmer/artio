@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -25,25 +25,25 @@ import java.util.Map;
 import java.util.Set;
 
 import static org.agrona.generation.CompilerUtil.compileInMemory;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
 import static uk.co.real_logic.artio.dictionary.ExampleDictionary.*;
 import static uk.co.real_logic.artio.util.Reflection.getField;
 
 public class ConstantGeneratorTest
 {
-    private static StringWriterOutputManager outputManager = new StringWriterOutputManager();
-    private static ConstantGenerator constantGenerator =
-        new ConstantGenerator(MESSAGE_EXAMPLE, TEST_PACKAGE, outputManager);
+    private static final StringWriterOutputManager OUTPUT_MANAGER = new StringWriterOutputManager();
+    private static final ConstantGenerator CONSTANT_GENERATOR = new ConstantGenerator(
+        MESSAGE_EXAMPLE, TEST_PACKAGE, OUTPUT_MANAGER);
 
     private static Object constants;
 
     @BeforeClass
     public static void generate() throws Exception
     {
-        constantGenerator.generate();
-        final Map<String, CharSequence> sources = outputManager.getSources();
+        CONSTANT_GENERATOR.generate();
+        final Map<String, CharSequence> sources = OUTPUT_MANAGER.getSources();
         final Class<?> constantsClass = compileInMemory(TEST_PACKAGE + "." + ConstantGenerator.CLASS_NAME, sources);
         if (constantsClass == null)
         {

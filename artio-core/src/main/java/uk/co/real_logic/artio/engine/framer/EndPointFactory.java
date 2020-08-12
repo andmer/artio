@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,13 +16,18 @@
 package uk.co.real_logic.artio.engine.framer;
 
 import org.agrona.ErrorHandler;
+import org.agrona.concurrent.status.AtomicCounter;
 import uk.co.real_logic.artio.FixCounters;
 import uk.co.real_logic.artio.engine.EngineConfiguration;
+import uk.co.real_logic.artio.engine.MessageTimingHandler;
 import uk.co.real_logic.artio.engine.SenderSequenceNumbers;
 import uk.co.real_logic.artio.protocol.GatewayPublication;
 
 class EndPointFactory
 {
+    private final FixReceiverEndPoint.FixReceiverEndPointFormatters formatters =
+        new FixReceiverEndPoint.FixReceiverEndPointFormatters();
+
     private final EngineConfiguration configuration;
     private final SessionContexts sessionContexts;
     private final GatewayPublication inboundLibraryPublication;
@@ -30,6 +35,7 @@ class EndPointFactory
     private final ErrorHandler errorHandler;
     private final GatewaySessions gatewaySessions;
     private final SenderSequenceNumbers senderSequenceNumbers;
+    private final MessageTimingHandler messageTimingHandler;
 
     private SlowPeeker replaySlowPeeker;
 
@@ -40,7 +46,8 @@ class EndPointFactory
         final FixCounters fixCounters,
         final ErrorHandler errorHandler,
         final GatewaySessions gatewaySessions,
-        final SenderSequenceNumbers senderSequenceNumbers)
+        final SenderSequenceNumbers senderSequenceNumbers,
+        final MessageTimingHandler messageTimingHandler)
     {
         this.configuration = configuration;
         this.sessionContexts = sessionContexts;
@@ -49,9 +56,10 @@ class EndPointFactory
         this.errorHandler = errorHandler;
         this.gatewaySessions = gatewaySessions;
         this.senderSequenceNumbers = senderSequenceNumbers;
+        this.messageTimingHandler = messageTimingHandler;
     }
 
-    ReceiverEndPoint receiverEndPoint(
+    FixReceiverEndPoint receiverEndPoint(
         final TcpChannel channel,
         final long connectionId,
         final long sessionId,
@@ -59,7 +67,7 @@ class EndPointFactory
         final int libraryId,
         final Framer framer)
     {
-        return new ReceiverEndPoint(
+        return new FixReceiverEndPoint(
             channel,
             configuration.receiverBufferSize(),
             inboundLibraryPublication,
@@ -71,8 +79,10 @@ class EndPointFactory
             framer,
             errorHandler,
             libraryId,
-            gatewaySessions
-        );
+            gatewaySessions,
+            configuration.clock(),
+            framer.acceptorFixDictionaryLookup(),
+            formatters);
     }
 
     SenderEndPoint senderEndPoint(
@@ -83,20 +93,22 @@ class EndPointFactory
         final Framer framer)
     {
         final String remoteAddress = channel.remoteAddress();
+        final AtomicCounter bytesInBuffer = fixCounters.bytesInBuffer(connectionId, remoteAddress);
         return new SenderEndPoint(
             connectionId,
             libraryId,
             libraryBlockablePosition,
             replaySlowPeeker,
             channel,
-            fixCounters.bytesInBuffer(connectionId, remoteAddress),
+            bytesInBuffer,
             fixCounters.invalidLibraryAttempts(connectionId, remoteAddress),
             errorHandler,
             framer,
             configuration.senderMaxBytesInBuffer(),
             configuration.slowConsumerTimeoutInMs(),
             System.currentTimeMillis(),
-            senderSequenceNumbers.onNewSender(connectionId));
+            senderSequenceNumbers.onNewSender(connectionId, bytesInBuffer),
+            messageTimingHandler);
     }
 
     void replaySlowPeeker(final SlowPeeker replaySlowPeeker)

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,7 @@
 package uk.co.real_logic.artio.library;
 
 import io.aeron.Subscription;
+import org.agrona.concurrent.UnsafeBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
 import org.junit.Before;
 import org.junit.Test;
@@ -25,17 +26,18 @@ import org.mockito.stubbing.Answer;
 import org.mockito.stubbing.OngoingStubbing;
 import org.mockito.verification.VerificationMode;
 import uk.co.real_logic.artio.FixCounters;
+import uk.co.real_logic.artio.dictionary.FixDictionary;
 import uk.co.real_logic.artio.engine.framer.FakeEpochClock;
 import uk.co.real_logic.artio.messages.ControlNotificationDecoder.SessionsDecoder;
+import uk.co.real_logic.artio.messages.MetaDataStatus;
 import uk.co.real_logic.artio.messages.SessionStatus;
 import uk.co.real_logic.artio.messages.SlowStatus;
 import uk.co.real_logic.artio.protocol.GatewayPublication;
+import uk.co.real_logic.artio.session.InternalSession;
 import uk.co.real_logic.artio.session.Session;
 import uk.co.real_logic.artio.timing.LibraryTimers;
 
 import java.util.List;
-import java.util.function.IntSupplier;
-import java.util.function.LongSupplier;
 
 import static io.aeron.CommonContext.IPC_CHANNEL;
 import static java.util.Arrays.asList;
@@ -45,9 +47,9 @@ import static org.junit.Assert.assertTrue;
 import static org.mockito.Mockito.*;
 import static uk.co.real_logic.artio.CommonConfiguration.DEFAULT_REPLY_TIMEOUT_IN_MS;
 import static uk.co.real_logic.artio.LivenessDetector.SEND_INTERVAL_FRACTION;
-import static uk.co.real_logic.artio.engine.FixEngine.ENGINE_LIBRARY_ID;
 import static uk.co.real_logic.artio.library.SessionConfiguration.*;
 import static uk.co.real_logic.artio.messages.ConnectionType.ACCEPTOR;
+import static uk.co.real_logic.artio.messages.InitialAcceptedSessionOwner.ENGINE;
 import static uk.co.real_logic.artio.messages.SessionState.ACTIVE;
 
 public class LibraryPollerTest
@@ -68,17 +70,17 @@ public class LibraryPollerTest
     private static final List<String> CLUSTER_CHANNELS = asList(FIRST_CHANNEL, LEADER_CHANNEL, "3");
     private static final int SEQUENCE_INDEX = 0;
 
-    private ArgumentCaptor<Session> session = ArgumentCaptor.forClass(Session.class);
-    private LibraryConnectHandler connectHandler = mock(LibraryConnectHandler.class);
-    private SessionHandler sessionHandler = mock(SessionHandler.class);
-    private SessionAcquireHandler sessionAcquireHandler = mock(SessionAcquireHandler.class);
-    private GatewayPublication outboundPublication = mock(GatewayPublication.class);
-    private Subscription inboundSubscription = mock(Subscription.class);
-    private LibraryTransport transport = mock(LibraryTransport.class);
-    private FixCounters counters = mock(FixCounters.class);
-    private FixLibrary fixLibrary = mock(FixLibrary.class);
-    private String address = "localhost:1234";
-    private FakeEpochClock clock = new FakeEpochClock();
+    private final ArgumentCaptor<Session> session = ArgumentCaptor.forClass(Session.class);
+    private final LibraryConnectHandler connectHandler = mock(LibraryConnectHandler.class);
+    private final SessionHandler sessionHandler = mock(SessionHandler.class);
+    private final SessionAcquireHandler sessionAcquireHandler = mock(SessionAcquireHandler.class);
+    private final GatewayPublication outboundPublication = mock(GatewayPublication.class);
+    private final Subscription inboundSubscription = mock(Subscription.class);
+    private final LibraryTransport transport = mock(LibraryTransport.class);
+    private final FixCounters counters = mock(FixCounters.class);
+    private final FixLibrary fixLibrary = mock(FixLibrary.class);
+    private final String address = "localhost:1234";
+    private final FakeEpochClock clock = new FakeEpochClock();
 
     private LibraryPoller library;
 
@@ -91,7 +93,7 @@ public class LibraryPollerTest
         when(counters.receivedMsgSeqNo(anyLong())).thenReturn(mock(AtomicCounter.class));
         when(counters.sentMsgSeqNo(anyLong())).thenReturn(mock(AtomicCounter.class));
 
-        when(sessionAcquireHandler.onSessionAcquired(session.capture(), anyBoolean())).thenReturn(sessionHandler);
+        when(sessionAcquireHandler.onSessionAcquired(session.capture(), any())).thenReturn(sessionHandler);
     }
 
     @Test
@@ -101,7 +103,7 @@ public class LibraryPollerTest
 
         manageConnection(CONNECTION_ID, SESSION_ID);
 
-        library.onControlNotification(libraryId(), noSessionIds());
+        library.onControlNotification(libraryId(), ENGINE, noSessionIds());
 
         verify(sessionHandler).onTimeout(libraryId(), session.getValue());
     }
@@ -114,7 +116,7 @@ public class LibraryPollerTest
         manageConnection(CONNECTION_ID, SESSION_ID);
         manageConnection(OTHER_CONNECTION_ID, OTHER_SESSION_ID);
 
-        library.onControlNotification(libraryId(), hasOtherSessionId());
+        library.onControlNotification(libraryId(), ENGINE, hasOtherSessionId());
 
         final Session firstSession = session.getAllValues().get(0);
         verify(sessionHandler).onTimeout(libraryId(), firstSession);
@@ -152,18 +154,6 @@ public class LibraryPollerTest
         disconnectDueToTimeout();
 
         reconnectAfterTimeout();
-    }
-
-    @Test
-    public void shouldAttemptAnotherEngineWhenNotLeader()
-    {
-        shouldReplyToOnNotLeaderWith(this::libraryId, this::connectCorrelationId, FIRST_CHANNEL, LEADER_CHANNEL);
-    }
-
-    @Test
-    public void shouldNotAttemptAnotherEngineWithDifferentLibraryId()
-    {
-        shouldReplyToOnNotLeaderWith(() -> ENGINE_LIBRARY_ID, this::connectCorrelationId, FIRST_CHANNEL);
     }
 
     @Test
@@ -288,38 +278,6 @@ public class LibraryPollerTest
         return library.libraryId();
     }
 
-    private long connectCorrelationId()
-    {
-        return library.connectCorrelationId();
-    }
-
-    private void shouldReplyToOnNotLeaderWith(
-        final IntSupplier libraryId,
-        final LongSupplier connectCorrelationId,
-        final String... channels)
-    {
-        whenPolled()
-            .then(
-                (inv) ->
-                {
-                    library.onNotLeader(libraryId.getAsInt(), connectCorrelationId.getAsLong(), LEADER_CHANNEL);
-                    return 1;
-                })
-            .then(replyWithApplicationHeartbeat())
-            .then(noReply());
-
-        newLibraryPoller(CLUSTER_CHANNELS);
-
-        library.startConnecting();
-
-        pollTwice();
-
-        poll();
-
-        attemptToConnectTo(channels);
-        verify(connectHandler).onConnect(fixLibrary);
-    }
-
     private void attemptToConnectTo(final String... channels)
     {
         final InOrder inOrder = inOrder(transport, outboundPublication);
@@ -327,6 +285,7 @@ public class LibraryPollerTest
         {
             inOrder.verify(transport).initStreams(channel);
             inOrder.verify(transport).inboundSubscription();
+            inOrder.verify(transport).inboundPublication();
             inOrder.verify(transport).outboundPublication();
             inOrder.verify(outboundPublication)
                    .saveLibraryConnect(eq(libraryId()), anyString(), anyLong());
@@ -395,12 +354,10 @@ public class LibraryPollerTest
             sessionId,
             LAST_SENT_SEQUENCE_NUMBER,
             LAST_RECEIVED_SEQUENCE_NUMBER,
-            -1,
             SessionStatus.SESSION_HANDOVER,
             SlowStatus.NOT_SLOW,
             ACCEPTOR,
             ACTIVE,
-            false,
             HEARTBEAT_INTERVAL_IN_S,
             DEFAULT_CLOSED_RESEND_INTERVAL,
             NO_RESEND_REQUEST_CHUNK_SIZE,
@@ -408,6 +365,13 @@ public class LibraryPollerTest
             DEFAULT_ENABLE_LAST_MSG_SEQ_NUM_PROCESSED,
             REPLY_TO_ID,
             SEQUENCE_INDEX,
+            InternalSession.INITIAL_AWAITING_HEARTBEAT,
+            InternalSession.INITIAL_LAST_RESENT_MSG_SEQ_NO,
+            InternalSession.INITIAL_LAST_RESEND_CHUNK_MSG_SEQ_NUM,
+            InternalSession.INITIAL_END_OF_RESEND_REQUEST_RANGE,
+            InternalSession.INITIAL_AWAITING_HEARTBEAT,
+            LAST_RECEIVED_SEQUENCE_NUMBER, SEQUENCE_INDEX,
+            Session.UNKNOWN_TIME, Session.UNKNOWN_TIME,
             "ABC",
             "",
             "",
@@ -415,7 +379,12 @@ public class LibraryPollerTest
             "",
             "", address,
             "",
-            "");
+            "",
+            FixDictionary.findDefault(),
+            MetaDataStatus.NO_META_DATA,
+            new UnsafeBuffer(new byte[0]),
+            0,
+            0);
     }
 
     private SessionsDecoder hasOtherSessionId()

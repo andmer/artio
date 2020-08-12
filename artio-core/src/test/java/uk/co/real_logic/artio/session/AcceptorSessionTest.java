@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,8 @@
 package uk.co.real_logic.artio.session;
 
 import org.junit.Test;
+import uk.co.real_logic.artio.Clock;
+import uk.co.real_logic.artio.protocol.GatewayPublication;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
 import static org.junit.Assert.assertEquals;
@@ -24,19 +26,22 @@ import static uk.co.real_logic.artio.CommonConfiguration.DEFAULT_SESSION_BUFFER_
 import static uk.co.real_logic.artio.engine.EngineConfiguration.DEFAULT_REASONABLE_TRANSMISSION_TIME_IN_MS;
 import static uk.co.real_logic.artio.library.SessionConfiguration.DEFAULT_ENABLE_LAST_MSG_SEQ_NUM_PROCESSED;
 import static uk.co.real_logic.artio.messages.SessionState.*;
+import static uk.co.real_logic.artio.session.DirectSessionProxy.NO_LAST_MSG_SEQ_NUM_PROCESSED;
 import static uk.co.real_logic.artio.session.Session.ACTIVE_VALUE;
-import static uk.co.real_logic.artio.session.SessionProxy.NO_LAST_MSG_SEQ_NUM_PROCESSED;
 
 public class AcceptorSessionTest extends AbstractSessionTest
 {
-    private AcceptorSession session = newAcceptorSession();
+    private final AcceptorSession session = newAcceptorSession();
 
     private AcceptorSession newAcceptorSession()
     {
-        final AcceptorSession acceptorSession = new AcceptorSession(HEARTBEAT_INTERVAL,
+        final AcceptorSession acceptorSession = new AcceptorSession(
+            HEARTBEAT_INTERVAL,
             CONNECTION_ID,
             fakeClock,
+            Clock.systemNanoTime(),
             sessionProxy,
+            mock(GatewayPublication.class),
             mockPublication,
             idStrategy,
             SENDING_TIME_WINDOW,
@@ -48,8 +53,12 @@ public class AcceptorSessionTest extends AbstractSessionTest
             CONNECTED,
             DEFAULT_REASONABLE_TRANSMISSION_TIME_IN_MS,
             new MutableAsciiBuffer(new byte[DEFAULT_SESSION_BUFFER_SIZE]),
-            DEFAULT_ENABLE_LAST_MSG_SEQ_NUM_PROCESSED);
-        acceptorSession.logonListener(mockLogonListener);
+            DEFAULT_ENABLE_LAST_MSG_SEQ_NUM_PROCESSED,
+            SessionCustomisationStrategy.none(),
+            messageInfo,
+            fakeEpochFractionClock);
+        acceptorSession.fixDictionary(makeDictionary());
+        acceptorSession.sessionProcessHandler(mockLogonListener);
         return acceptorSession;
     }
 
@@ -85,7 +94,7 @@ public class AcceptorSessionTest extends AbstractSessionTest
         onLogon(3);
 
         verifyLogon();
-        verify(sessionProxy).resendRequest(2, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(2, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         verify(sessionProxy).seqNumResetRequested();
         verifyNoFurtherMessages();
     }
@@ -130,8 +139,8 @@ public class AcceptorSessionTest extends AbstractSessionTest
 
     private void verifyLogon()
     {
-        verify(sessionProxy).logon(
-            HEARTBEAT_INTERVAL, 1, null, null, false, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendLogon(
+            1, HEARTBEAT_INTERVAL, null, null, false, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
 }

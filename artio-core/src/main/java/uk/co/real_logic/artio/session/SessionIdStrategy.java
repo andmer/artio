@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,8 +17,8 @@ package uk.co.real_logic.artio.session;
 
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
-import uk.co.real_logic.artio.builder.HeaderEncoder;
-import uk.co.real_logic.artio.decoder.HeaderDecoder;
+import uk.co.real_logic.artio.builder.SessionHeaderEncoder;
+import uk.co.real_logic.artio.decoder.SessionHeaderDecoder;
 
 /**
  * This strategy creates the composite key that uniquely identifies Session Ids. This is a strategy
@@ -56,7 +56,7 @@ public interface SessionIdStrategy
      * @param header the header of the logon message.
      * @return the composite session key.
      */
-    CompositeKey onAcceptLogon(HeaderDecoder header);
+    CompositeKey onAcceptLogon(SessionHeaderDecoder header);
 
     /**
      * Creates the composite session key when you initiate a logon.
@@ -83,7 +83,7 @@ public interface SessionIdStrategy
      * @param compositeKey the composite session key.
      * @param headerEncoder the outbound message header.
      */
-    void setupSession(CompositeKey compositeKey, HeaderEncoder headerEncoder);
+    void setupSession(CompositeKey compositeKey, SessionHeaderEncoder headerEncoder);
 
     /**
      * Saves the given composite key to a buffer.
@@ -104,4 +104,13 @@ public interface SessionIdStrategy
      * @return the loaded key or null if there was a failure.
      */
     CompositeKey load(DirectBuffer buffer, int offset, int length);
+
+    /**
+     * Check that the header of a message matches the expected composite key of the session.
+     *
+     * @param compositeKey the expected key.
+     * @param header the header of the message that is to be validated.
+     * @return the tag number that is invalid or 0 if everything is valid.
+     */
+    int validateCompIds(CompositeKey compositeKey, SessionHeaderDecoder header);
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,9 +17,13 @@ package uk.co.real_logic.artio.protocol;
 
 import io.aeron.ExclusivePublication;
 import io.aeron.logbuffer.BufferClaim;
+import org.agrona.CloseHelper;
+import org.agrona.DirectBuffer;
 import org.agrona.concurrent.IdleStrategy;
 import org.agrona.concurrent.status.AtomicCounter;
 import uk.co.real_logic.artio.messages.MessageHeaderEncoder;
+
+import java.util.Objects;
 
 import static io.aeron.Publication.CLOSED;
 import static io.aeron.Publication.MAX_POSITION_EXCEEDED;
@@ -35,7 +39,8 @@ class ClaimablePublication implements AutoCloseable
     private final AtomicCounter fails;
     protected final MessageHeaderEncoder header = new MessageHeaderEncoder();
     protected final BufferClaim bufferClaim = new BufferClaim();
-    protected final ExclusivePublication dataPublication;
+    protected ExclusivePublication dataPublication;
+    private long initialPosition;
 
     protected final IdleStrategy idleStrategy;
 
@@ -48,7 +53,7 @@ class ClaimablePublication implements AutoCloseable
         this.maxClaimAttempts = maxClaimAttempts;
         this.idleStrategy = idleStrategy;
         this.fails = fails;
-        this.dataPublication = dataPublication;
+        dataPublication(dataPublication);
     }
 
     protected long claim(final int framedLength)
@@ -88,6 +93,29 @@ class ClaimablePublication implements AutoCloseable
         {
             return position;
         }
+    }
+
+    public long offer(final DirectBuffer buffer, final int offset, final int length)
+    {
+        return dataPublication.offer(buffer, offset, length);
+    }
+
+    public ExclusivePublication dataPublication()
+    {
+        return dataPublication;
+    }
+
+    public void dataPublication(final ExclusivePublication dataPublication)
+    {
+        Objects.requireNonNull(dataPublication, "dataPublication");
+        CloseHelper.close(this.dataPublication);
+        this.dataPublication = dataPublication;
+        initialPosition = dataPublication.position();
+    }
+
+    public long initialPosition()
+    {
+        return initialPosition;
     }
 
     public void close()

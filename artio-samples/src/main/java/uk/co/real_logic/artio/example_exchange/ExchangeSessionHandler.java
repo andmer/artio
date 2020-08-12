@@ -8,6 +8,7 @@ import uk.co.real_logic.artio.builder.ExecutionReportEncoder;
 import uk.co.real_logic.artio.decoder.NewOrderSingleDecoder;
 import uk.co.real_logic.artio.dictionary.generation.CodecUtil;
 import uk.co.real_logic.artio.fields.DecimalFloat;
+import uk.co.real_logic.artio.library.OnMessageInfo;
 import uk.co.real_logic.artio.library.SessionHandler;
 import uk.co.real_logic.artio.messages.DisconnectReason;
 import uk.co.real_logic.artio.session.Session;
@@ -56,25 +57,24 @@ public class ExchangeSessionHandler implements SessionHandler
         final int libraryId,
         final Session session,
         final int sequenceIndex,
-        final int messageType,
+        final long messageType,
         final long timestampInNs,
-        final long position)
+        final long position,
+        final OnMessageInfo messageInfo)
     {
         asciiBuffer.wrap(buffer, offset, length);
 
-        switch (messageType)
+        if (messageType == NewOrderSingleDecoder.MESSAGE_TYPE)
         {
-            case NewOrderSingleDecoder.MESSAGE_TYPE:
+
+            newOrderSingle.decode(asciiBuffer, 0, length);
+
+            if (!validOrder())
             {
-                newOrderSingle.decode(asciiBuffer, 0, length);
-
-                if (!validOrder())
-                {
-                    return cancelOrder(session);
-                }
-
-                return fillOrder(session);
+                return cancelOrder(session);
             }
+
+            return fillOrder(session);
         }
 
         return CONTINUE;
@@ -97,7 +97,7 @@ public class ExchangeSessionHandler implements SessionHandler
 
         executionReport.instrument().symbol(newOrderSingle.symbol(), newOrderSingle.symbolLength());
 
-        return Pressure.apply(session.send(executionReport));
+        return Pressure.apply(session.trySend(executionReport));
     }
 
     private boolean validOrder()
@@ -134,7 +134,7 @@ public class ExchangeSessionHandler implements SessionHandler
 
         executionReport.instrument().symbol(SYMBOL_BYTES);
 
-        final long sendPosition = session.send(executionReport);
+        final long sendPosition = session.trySend(executionReport);
         if (Pressure.isBackPressured(sendPosition))
         {
             // Roll back transactional state and indicate that you need to retry.

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -29,10 +29,13 @@ import uk.co.real_logic.artio.messages.GatewayError;
  */
 abstract class LibraryReply<T> implements Reply<T>
 {
-    private final long latestReplyArrivalTimeInMs;
     final LibraryPoller libraryPoller;
 
+    final long latestReplyArrivalTimeInMs;
+
+    boolean requiresResend;
     long correlationId;
+
     private Exception error;
     private T result;
     private State state = State.EXECUTING;
@@ -51,6 +54,8 @@ abstract class LibraryReply<T> implements Reply<T>
             onError(new FixGatewayException("Not connected to the Gateway"));
         }
     }
+
+    protected abstract void sendMessage();
 
     protected void register()
     {
@@ -84,7 +89,16 @@ abstract class LibraryReply<T> implements Reply<T>
         state = State.ERRORED;
     }
 
-    abstract void onError(GatewayError errorType, String errorMessage);
+    void onError(final GatewayError errorType, final String errorMessage)
+    {
+    }
+
+    protected boolean onTimeout()
+    {
+        state = State.TIMED_OUT;
+
+        return true;
+    }
 
     /**
      * Poll the reply's duty cycle.
@@ -95,10 +109,14 @@ abstract class LibraryReply<T> implements Reply<T>
      */
     boolean poll(final long timeInMs)
     {
+        if (requiresResend)
+        {
+            sendMessage();
+        }
+
         if (timeInMs >= latestReplyArrivalTimeInMs)
         {
-            state = State.TIMED_OUT;
-            return true;
+            return onTimeout();
         }
 
         if (!isExecuting())

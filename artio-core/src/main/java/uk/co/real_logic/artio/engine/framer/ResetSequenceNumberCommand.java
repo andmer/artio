@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -41,8 +41,10 @@ class ResetSequenceNumberCommand implements Reply<Void>, AdminCommand
     private final SequenceNumberIndexReader sentSequenceNumberIndex;
     private final GatewayPublication inboundPublication;
     private final GatewayPublication outboundPublication;
+    private final long resetTime;
     private Session session;
     private LongToIntFunction libraryLookup;
+    private long waitSequence = 1;
 
     void libraryLookup(final LongToIntFunction libraryLookup)
     {
@@ -86,7 +88,8 @@ class ResetSequenceNumberCommand implements Reply<Void>, AdminCommand
         final SequenceNumberIndexReader receivedSequenceNumberIndex,
         final SequenceNumberIndexReader sentSequenceNumberIndex,
         final GatewayPublication inboundPublication,
-        final GatewayPublication outboundPublication)
+        final GatewayPublication outboundPublication,
+        final long resetTime)
     {
         this.sessionId = sessionId;
         this.gatewaySessions = gatewaySessions;
@@ -95,6 +98,7 @@ class ResetSequenceNumberCommand implements Reply<Void>, AdminCommand
         this.sentSequenceNumberIndex = sentSequenceNumberIndex;
         this.inboundPublication = inboundPublication;
         this.outboundPublication = outboundPublication;
+        this.resetTime = resetTime;
     }
 
     public Exception error()
@@ -153,7 +157,7 @@ class ResetSequenceNumberCommand implements Reply<Void>, AdminCommand
                 // Not logged in
                 else
                 {
-                    sessionContexts.sequenceReset(sessionId);
+                    sessionContexts.sequenceReset(sessionId, resetTime);
                     step = Step.RESET_RECV;
                 }
 
@@ -162,9 +166,10 @@ class ResetSequenceNumberCommand implements Reply<Void>, AdminCommand
 
             case RESET_ENGINE_SESSION:
             {
-                final long position = session.resetSequenceNumbers();
+                final long position = session.tryResetSequenceNumbers();
                 if (!Pressure.isBackPressured(position))
                 {
+                    waitSequence = 1;
                     step = Step.AWAIT_RECV;
                 }
                 return false;
@@ -178,6 +183,7 @@ class ResetSequenceNumberCommand implements Reply<Void>, AdminCommand
                     if (!Pressure.isBackPressured(
                         inboundPublication.saveResetLibrarySequenceNumber(libraryId, sessionId)))
                     {
+                        waitSequence = 1;
                         step = Step.AWAIT_RECV;
                     }
                 }
@@ -191,18 +197,21 @@ class ResetSequenceNumberCommand implements Reply<Void>, AdminCommand
             }
 
             case RESET_RECV:
+                waitSequence = 0;
                 return reset(inboundPublication, Step.RESET_SENT);
 
             case RESET_SENT:
+                waitSequence = 0;
                 return reset(outboundPublication, Step.AWAIT_RECV);
 
             case AWAIT_RECV:
-                return await(receivedSequenceNumberIndex);
+                return await(receivedSequenceNumberIndex, Step.AWAIT_SENT);
 
             case AWAIT_SENT:
-                return await(sentSequenceNumberIndex);
+                return await(sentSequenceNumberIndex, Step.DONE);
 
             case DONE:
+                state = COMPLETED;
                 return true;
         }
 
@@ -224,15 +233,15 @@ class ResetSequenceNumberCommand implements Reply<Void>, AdminCommand
         return false;
     }
 
-    private boolean await(final SequenceNumberIndexReader sequenceNumberIndex)
+    private boolean await(final SequenceNumberIndexReader sequenceNumberIndex, final Step nextStep)
     {
-        final boolean done = sequenceNumberIndex.lastKnownSequenceNumber(sessionId) == 1;
+        final int lastKnownSequenceNumber = sequenceNumberIndex.lastKnownSequenceNumber(sessionId);
+        final boolean done = lastKnownSequenceNumber <= waitSequence;
         if (done)
         {
-            step = Step.DONE;
-            state = COMPLETED;
+            step = nextStep;
         }
-        return done;
+        return false;
     }
 
     private boolean sessionIsUnknown()

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,35 +17,46 @@ package uk.co.real_logic.artio.library;
 
 import io.aeron.logbuffer.ControlledFragmentHandler.Action;
 import org.agrona.DirectBuffer;
+import uk.co.real_logic.artio.Reply;
 import uk.co.real_logic.artio.messages.DisconnectReason;
 import uk.co.real_logic.artio.messages.MessageStatus;
+import uk.co.real_logic.artio.messages.ReplayMessagesStatus;
 import uk.co.real_logic.artio.session.*;
 import uk.co.real_logic.artio.timing.Timer;
+
+import java.util.function.BooleanSupplier;
 
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.*;
 import static uk.co.real_logic.artio.messages.GatewayError.UNABLE_TO_LOGON;
 
-class SessionSubscriber implements AutoCloseable
+class SessionSubscriber implements AutoCloseable, SessionProcessHandler
 {
+    private final OnMessageInfo info;
     private final SessionParser parser;
     private final InternalSession session;
     private final Timer receiveTimer;
     private final Timer sessionTimer;
+    private final LibraryPoller libraryPoller;
 
     private SessionHandler handler;
     private InitiateSessionReply initiateSessionReply;
+    private boolean userAbortedLastMessage = false;
 
     SessionSubscriber(
+        final OnMessageInfo info,
         final SessionParser parser,
         final InternalSession session,
         final Timer receiveTimer,
-        final Timer sessionTimer)
+        final Timer sessionTimer,
+        final LibraryPoller libraryPoller)
     {
+        this.info = info;
         this.parser = parser;
         this.session = session;
         this.receiveTimer = receiveTimer;
         this.sessionTimer = sessionTimer;
-        this.session.logonListener(this::onSessionLogon);
+        this.libraryPoller = libraryPoller;
+        this.session.sessionProcessHandler(this);
     }
 
     Action onMessage(
@@ -53,44 +64,80 @@ class SessionSubscriber implements AutoCloseable
         final int offset,
         final int length,
         final int libraryId,
-        final long sessionId,
         final int sequenceIndex,
-        final int messageType,
+        final long messageType,
         final long timestamp,
         final MessageStatus status,
         final long position)
     {
         final long now = receiveTimer.recordSince(timestamp);
 
+        final OnMessageInfo info = this.info;
+        info.status(status);
+        // this gets set to false by the Session when a problem is detected.
+        info.isValid(true);
+
         try
         {
             switch (status)
             {
                 case OK:
-                    final Action action = parser.onMessage(buffer, offset, length, messageType, sessionId);
-                    if (action == BREAK)
+                    final boolean userAbortedLastMessage = this.userAbortedLastMessage;
+                    if (userAbortedLastMessage)
                     {
-                        return BREAK;
+                        // Don't re-run the parser / session handling logic if you're on the retry path
+                        final Action handlerAction = handler.onMessage(
+                            buffer,
+                            offset,
+                            length,
+                            libraryId,
+                            session,
+                            sequenceIndex,
+                            messageType,
+                            timestamp,
+                            position,
+                            info);
+
+                        if (handlerAction != ABORT)
+                        {
+                            session.updateLastMessageProcessed();
+                            this.userAbortedLastMessage = false;
+                        }
+
+                        return handlerAction;
                     }
-
-                    // Can receive messages when no longer disconnected.
-                    final Action handlerAction = handler.onMessage(
-                        buffer,
-                        offset,
-                        length,
-                        libraryId,
-                        session,
-                        sequenceIndex,
-                        messageType,
-                        timestamp,
-                        position);
-
-                    if (handlerAction == CONTINUE || handlerAction == COMMIT)
+                    else
                     {
-                        session.updateLastMessageProcessed();
-                    }
+                        final Action action = parser.onMessage(
+                            buffer, offset, length, messageType, position);
+                        if (action == ABORT)
+                        {
+                            return ABORT;
+                        }
 
-                    return handlerAction;
+                        final Action handlerAction = handler.onMessage(
+                            buffer,
+                            offset,
+                            length,
+                            libraryId,
+                            session,
+                            sequenceIndex,
+                            messageType,
+                            timestamp,
+                            position,
+                            info);
+
+                        if (handlerAction == ABORT)
+                        {
+                            this.userAbortedLastMessage = true;
+                        }
+                        else
+                        {
+                            session.updateLastMessageProcessed();
+                        }
+
+                        return handlerAction;
+                    }
 
                 case CATCHUP_REPLAY:
                     return handler.onMessage(
@@ -102,7 +149,8 @@ class SessionSubscriber implements AutoCloseable
                         sequenceIndex,
                         messageType,
                         timestamp,
-                        position);
+                        position,
+                        info);
 
                 default:
                     return CONTINUE;
@@ -130,13 +178,9 @@ class SessionSubscriber implements AutoCloseable
         return action;
     }
 
-    private void onSessionLogon(final Session session)
+    public void onLogon(final Session session)
     {
-        // Should only be fired if we already own the session and the client sends another logon to run and end of day.
-        if (session.hasLogonTime())
-        {
-            handler.onSessionStart(session);
-        }
+        handler.onSessionStart(session);
 
         if (initiateSessionReply != null)
         {
@@ -145,6 +189,29 @@ class SessionSubscriber implements AutoCloseable
             // lifetime of the Session
             initiateSessionReply = null;
         }
+    }
+
+    public Reply<ReplayMessagesStatus> replayReceivedMessages(
+        final long sessionId,
+        final int replayFromSequenceNumber,
+        final int replayFromSequenceIndex,
+        final int replayToSequenceNumber,
+        final int replayToSequenceIndex,
+        final long timeout)
+    {
+        return new ReplayMessagesReply(
+            libraryPoller,
+            libraryPoller.timeInMs() + timeout,
+            sessionId,
+            replayFromSequenceNumber,
+            replayFromSequenceIndex,
+            replayToSequenceNumber,
+            replayToSequenceIndex);
+    }
+
+    public void enqueueTask(final BooleanSupplier task)
+    {
+        libraryPoller.enqueueTask(task);
     }
 
     void onTimeout(final int libraryId)

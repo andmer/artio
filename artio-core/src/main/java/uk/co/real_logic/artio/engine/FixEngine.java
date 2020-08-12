@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,12 +19,9 @@ import io.aeron.ExclusivePublication;
 import io.aeron.Image;
 import io.aeron.Subscription;
 import io.aeron.archive.client.AeronArchive;
+import org.agrona.collections.Long2LongHashMap;
 import org.agrona.concurrent.AgentInvoker;
-import org.agrona.concurrent.IdleStrategy;
-import uk.co.real_logic.artio.FixCounters;
-import uk.co.real_logic.artio.GatewayProcess;
-import uk.co.real_logic.artio.Reply;
-import uk.co.real_logic.artio.StreamInformation;
+import uk.co.real_logic.artio.*;
 import uk.co.real_logic.artio.engine.framer.FramerContext;
 import uk.co.real_logic.artio.engine.framer.LibraryInfo;
 import uk.co.real_logic.artio.timing.EngineTimers;
@@ -56,9 +53,15 @@ public final class FixEngine extends GatewayProcess
     private final EngineConfiguration configuration;
     private final RecordingCoordinator recordingCoordinator;
 
-    private EngineScheduler scheduler;
+    private final EngineScheduler scheduler;
     private FramerContext framerContext;
     private EngineContext engineContext;
+
+    private volatile boolean startingClose = false;
+    private volatile boolean isClosed = false;
+
+    private final Object resetStateLock = new Object();
+    private volatile boolean stateHasBeenReset = false;
 
     /**
      * Launch the engine. This method starts up the engine threads and then returns.
@@ -90,17 +93,57 @@ public final class FixEngine extends GatewayProcess
     }
 
     /**
+     * Unbinds the acceptor socket. This does not disconnect any currently connected TCP connections.
+     *
+     * If the reply is <code>null</code> then the query hasn't been enqueued and the operation
+     * should be retried on a duty cycle.
+     *
+     * @return the reply object, or null if the request hasn't been successfully enqueued.
+     */
+    public Reply<?> unbind()
+    {
+        return unbind(false);
+    }
+
+    /**
+     * Unbinds the acceptor socket, and disconnects currently connected TCP connections if requested.
+     *
+     * If the reply is <code>null</code> then the query hasn't been enqueued and the operation
+     * should be retried on a duty cycle.
+     *
+     * @param disconnect if currently connected connections need to be disconnected
+     * @return the reply object, or null if the request hasn't been successfully enqueued.
+     */
+    public Reply<?> unbind(final boolean disconnect)
+    {
+        return framerContext.unbind(disconnect);
+    }
+
+
+    /**
+     * Binds the acceptor socket to the configured address. This only needs to be called if you had called
+     * {@link #unbind()} previously - {@link FixEngine#launch()} will bind the socket by default.
+     *
+     * If the reply is <code>null</code> then the query hasn't been enqueued and the operation
+     * should be retried on a duty cycle.
+     *
+     * @return the reply object, or null if the request hasn't been successfully enqueued.
+     */
+    public Reply<?> bind()
+    {
+        return framerContext.bind();
+    }
+
+    /**
      * Resets the set of session ids.
      *
      * @param backupLocation the location to backup the current session ids file to.
      *                       Can be null to indicate that no backup is required.
-     * @param idleStrategy the idle strategy to use when polling this blocking operation.
-     *
      * @return the reply object, or null if the request hasn't been successfully enqueued.
      */
-    public Reply<?> resetSessionIds(final File backupLocation, final IdleStrategy idleStrategy)
+    public Reply<?> resetSessionIds(final File backupLocation)
     {
-        return framerContext.resetSessionIds(backupLocation, idleStrategy);
+        return framerContext.resetSessionIds(backupLocation);
     }
 
     /**
@@ -117,6 +160,55 @@ public final class FixEngine extends GatewayProcess
     public Reply<?> resetSequenceNumber(final long sessionId)
     {
         return framerContext.resetSequenceNumber(sessionId);
+    }
+
+    /**
+     * This method resets the state of the of the FixEngine that also performs usual end of day processing
+     * operations. It must can only be called when the FixEngine object has been closed. These are:
+     *
+     * <ol>
+     *     <li>Reset and optionally back up all Artio state (including session ids and sequence numbers</li>
+     *     <li>Truncate any recordings associated with this engine instance.</li>
+     * </ol>
+     *
+     * Blocks until the operation is complete.
+     *
+     * @param backupLocation the directory that you wish to copy Artio's session state over to for later inspection.
+     *                       If this is null no backup of data will be performed. If the directory exists it will be
+     *                       re-used, if it doesn't it will be created.
+     *
+     * @throws IllegalStateException if this <code>FixEngine</code> hasn't been closed when this method is called.
+     */
+    public void resetState(final File backupLocation)
+    {
+        if (!isClosed())
+        {
+            throw new IllegalStateException("Engine should be closed before the state is reset");
+        }
+
+        synchronized (resetStateLock)
+        {
+            if (!stateHasBeenReset)
+            {
+                final ResetArchiveState resetArchiveState = new ResetArchiveState(
+                    configuration, backupLocation, recordingCoordinator);
+                resetArchiveState.resetState();
+
+                stateHasBeenReset = true;
+            }
+        }
+    }
+
+    /**
+     * Gets session info for all sessions the FixEngine is aware of including offline ones.
+     * Can be used to acquire offline sessions or for administration purposes.
+     * The returned list is updated in a thread-safe manner when new sessions are created.
+     *
+     * @return the list of session infos.
+     */
+    public List<SessionInfo> allSessions()
+    {
+        return framerContext.allSessions();
     }
 
     /**
@@ -161,9 +253,11 @@ public final class FixEngine extends GatewayProcess
             final AeronArchive aeronArchive =
                 configuration.logAnyMessages() ? AeronArchive.connect(archiveContext.aeron(aeron)) : null;
             recordingCoordinator = new RecordingCoordinator(
+                aeron,
                 aeronArchive,
                 configuration,
-                configuration.archiverIdleStrategy());
+                configuration.archiverIdleStrategy(),
+                errorHandler);
 
             final ExclusivePublication replayPublication = replayPublication();
             engineContext = new EngineContext(
@@ -175,8 +269,7 @@ public final class FixEngine extends GatewayProcess
                 aeronArchive,
                 recordingCoordinator);
             initFramer(configuration, fixCounters, replayPublication.sessionId());
-            initMonitoringAgent(timers.all(), configuration);
-            recordingCoordinator.awaitReady();
+            initMonitoringAgent(timers.all(), configuration, aeronArchive);
         }
         catch (final Exception e)
         {
@@ -211,7 +304,10 @@ public final class FixEngine extends GatewayProcess
             replayImage("slow-replay", replaySessionId),
             timers,
             aeron.conductorAgentInvoker(),
-            recordingCoordinator);
+            recordingCoordinator
+        );
+
+        engineContext.framerContext(framerContext);
     }
 
     private Image replayImage(final String name, final int replaySessionId)
@@ -251,7 +347,7 @@ public final class FixEngine extends GatewayProcess
             configuration,
             errorHandler,
             framerContext.framer(),
-            engineContext.archivingAgent(),
+            engineContext.indexingAgent(),
             monitoringAgent,
             conductorAgent(),
             recordingCoordinator);
@@ -260,21 +356,93 @@ public final class FixEngine extends GatewayProcess
     }
 
     /**
-     * Close the engine down, including stopping other running threads.
+     * Close the engine down, including stopping other running threads. This also stops accepting new connections, and
+     * logs out and disconnects all currently active FIX sessions.
      *
-     * This does not remove files associated with the engine, that are persistent
-     * over multiple runs of the engine.
+     * NB: graceful shutdown of the FixEngine will wait for logouts to occur. This entails communicating with all
+     * <code>FixLibrary</code> instances currently live in order for them to gracefully close as well. Therefore if you
+     * close a <code>FixLibrary</code> before you call this method then the close operation could be delayed by up to
+     * {@link uk.co.real_logic.artio.CommonConfiguration#replyTimeoutInMs()} in order for the <code>FixEngine</code>
+     * to timeout the <code>FixLibrary</code>. In order for graceful shutdown to successfully occur you should also
+     * ensure that any connected <code>FixLibrary</code> instances are regularly polled on their duty cycle.
+     *
+     * This does not remove files associated with the engine, that are persistent over multiple runs of the engine.
      */
     public void close()
     {
         synchronized (CLOSE_MUTEX)
         {
-            closeAll(scheduler, engineContext, configuration, super::close);
+            if (!isClosed)
+            {
+                startingClose = true;
+
+                DebugLogger.log(LogTag.CLOSE, "Shutdown initiated through FixEngine.close()");
+
+                framerContext.startClose();
+
+                try
+                {
+                    closeAll(scheduler, engineContext, configuration, super::close);
+                }
+                finally
+                {
+                    isClosed = true;
+                }
+            }
         }
+    }
+
+    /**
+     * Find out whether the {@link #close()} operation has been called.
+     *
+     * @return true if the {@link #close()} operation has been called, false otherwise.
+     */
+    public boolean isClosed()
+    {
+        return isClosed;
+    }
+
+    /**
+     * Frees up space from the Aeron archive of messages. This operation does not remove all entries from the Aeron
+     * archive logs: only entries that are not part of the latest sequence index. That means that resend requests for
+     * the current sequence index can still be processed.
+     *
+     * Archive logs are pruned in chunks called segments - see the Aeron Archiver documentation for
+     * details. This means that if there are less than a segment's worth of messages that can be
+     * freed up then no space is pruned.
+     *
+     * @param recordingIdToMinimumPrunePositions the minimum positions to prune or <code>null</code> otherwise.
+     *                                           If you're archiving segments of the
+     *                                           Aeron archive log then this parameter can be used in order to stop
+     *                                           those segments from being removed. The hashmap should be initialised
+     *                                           with <code>new Long2LongHashMap(Aeron.NULL_VALUE)</code>.
+     * @return the positions pruned up to. This is a map from recording id to a pruned position if pruning has occurred.
+     *         It may be empty if no recordings have been pruned. <code>Aeron.NULL_VALUE</code> is used to denote
+     *         missing values in the map.
+     */
+    public Reply<Long2LongHashMap> pruneArchive(final Long2LongHashMap recordingIdToMinimumPrunePositions)
+    {
+        if (startingClose)
+        {
+            return engineContext.pruneArchive(new IllegalStateException("Unable to prune archive during shutdown."));
+        }
+
+        if (isClosed)
+        {
+            return engineContext.pruneArchive(new IllegalStateException("Unable to prune archive when closed."));
+        }
+
+        return engineContext.pruneArchive(recordingIdToMinimumPrunePositions);
     }
 
     public EngineConfiguration configuration()
     {
         return configuration;
+    }
+
+    // Exceptions here are always on internal FixEngine threads and should not cause those threads to terminate.
+    protected boolean shouldRethrowExceptionInErrorHandler()
+    {
+        return false;
     }
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -26,5 +26,13 @@ import uk.co.real_logic.artio.session.Session;
 @FunctionalInterface
 public interface SessionAcquireHandler
 {
-    SessionHandler onSessionAcquired(Session session, boolean isSlow);
+    /**
+     * Callback invoked when a new session comes under the control of
+     *  * the library interface that its associated with.
+     *
+     * @param session the session object that has been acquired.
+     * @param acquiredInfo the information associated with this session
+     * @return the {@link SessionHandler} that will receive messages associated with this Session.
+     */
+    SessionHandler onSessionAcquired(Session session, SessionAcquiredInfo acquiredInfo);
 }

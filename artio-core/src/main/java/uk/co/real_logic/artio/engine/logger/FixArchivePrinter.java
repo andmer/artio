@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,8 @@ package uk.co.real_logic.artio.engine.logger;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
 import uk.co.real_logic.artio.CommonConfiguration;
-import uk.co.real_logic.artio.decoder.HeaderDecoder;
+import uk.co.real_logic.artio.decoder.SessionHeaderDecoder;
+import uk.co.real_logic.artio.dictionary.FixDictionary;
 import uk.co.real_logic.artio.messages.FixMessageDecoder;
 
 import java.util.function.Predicate;
@@ -44,8 +45,9 @@ public final class FixArchivePrinter
         int archiveScannerStreamId = DEFAULT_ARCHIVE_SCANNER_STREAM;
         FixMessagePredicate predicate = FixMessagePredicates.alwaysTrue();
         boolean follow = false;
+        Class<? extends FixDictionary> fixDictionaryType = FixDictionary.findDefault();
 
-        Predicate<HeaderDecoder> headerPredicate = null;
+        Predicate<SessionHeaderDecoder> headerPredicate = null;
 
         for (final String arg : args)
         {
@@ -123,6 +125,10 @@ public final class FixArchivePrinter
                 case "aeron-channel":
                     aeronChannel = optionValue;
                     break;
+
+                case "fix-dictionary":
+                    fixDictionaryType = FixDictionary.find(optionValue);
+                    break;
             }
         }
 
@@ -130,7 +136,7 @@ public final class FixArchivePrinter
         requiredArgument(aeronChannel, "aeron-channel");
 
         scanArchive(aeronDirectoryName, aeronChannel, queryStreamId, predicate, follow, headerPredicate,
-            archiveScannerStreamId);
+            archiveScannerStreamId, fixDictionaryType);
     }
 
     private static void requiredArgument(final int eqIndex)
@@ -149,26 +155,30 @@ public final class FixArchivePrinter
         final int queryStreamId,
         final FixMessagePredicate otherPredicate,
         final boolean follow,
-        final Predicate<HeaderDecoder> headerPredicate,
-        final int archiveScannerStreamId)
+        final Predicate<SessionHeaderDecoder> headerPredicate,
+        final int archiveScannerStreamId,
+        final Class<? extends FixDictionary> fixDictionaryType)
     {
+        final FixDictionary fixDictionary = FixDictionary.of(fixDictionaryType);
         FixMessagePredicate predicate = otherPredicate;
         if (headerPredicate != null)
         {
-            predicate = whereHeader(headerPredicate).and(predicate);
+            predicate = whereHeader(fixDictionary, headerPredicate).and(predicate);
         }
 
         final FixArchiveScanner.Context context = new FixArchiveScanner.Context()
             .aeronDirectoryName(aeronDirectoryName)
             .idleStrategy(CommonConfiguration.backoffIdleStrategy());
 
-        final FixArchiveScanner scanner = new FixArchiveScanner(context);
-        scanner.scan(
-            aeronChannel,
-            queryStreamId,
-            filterBy(FixArchivePrinter::print, predicate),
-            follow,
-            archiveScannerStreamId);
+        try (FixArchiveScanner scanner = new FixArchiveScanner(context))
+        {
+            scanner.scan(
+                aeronChannel,
+                queryStreamId,
+                filterBy(FixArchivePrinter::print, predicate),
+                follow,
+                archiveScannerStreamId);
+        }
     }
 
     private static void requiredArgument(final String argument, final String description)

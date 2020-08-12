@@ -133,7 +133,7 @@ public class Buyer implements LibraryConnectHandler, SessionHandler, SessionAcqu
         newOrderSingle.instrument().symbol("MSFT");
         newOrderSingle.orderQtyData().orderQty(orderQty);
 
-        final long position = session.send(newOrderSingle);
+        final long position = session.trySend(newOrderSingle);
         if (!Pressure.isBackPressured(position))
         {
             state = State.AWAITING_FILL;
@@ -147,9 +147,10 @@ public class Buyer implements LibraryConnectHandler, SessionHandler, SessionAcqu
         final int libraryId,
         final Session session,
         final int sequenceIndex,
-        final int messageType,
+        final long messageType,
         final long timestampInNs,
-        final long position)
+        final long position,
+        final OnMessageInfo messageInfo)
     {
         if (messageType == ExecutionReportDecoder.MESSAGE_TYPE)
         {
@@ -185,7 +186,7 @@ public class Buyer implements LibraryConnectHandler, SessionHandler, SessionAcqu
     {
     }
 
-    public SessionHandler onSessionAcquired(final Session session, final boolean isSlow)
+    public SessionHandler onSessionAcquired(final Session session, final SessionAcquiredInfo isSlow)
     {
         return this;
     }

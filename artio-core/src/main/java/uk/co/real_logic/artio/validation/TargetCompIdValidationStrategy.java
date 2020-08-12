@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,8 +15,8 @@
  */
 package uk.co.real_logic.artio.validation;
 
-import uk.co.real_logic.artio.Constants;
-import uk.co.real_logic.artio.decoder.HeaderDecoder;
+import uk.co.real_logic.artio.decoder.SessionHeaderDecoder;
+import uk.co.real_logic.artio.dictionary.SessionConstants;
 import uk.co.real_logic.artio.dictionary.generation.CodecUtil;
 
 import static uk.co.real_logic.artio.fields.RejectReason.COMPID_PROBLEM;
@@ -33,14 +33,14 @@ final class TargetCompIdValidationStrategy implements MessageValidationStrategy
         this.gatewayCompId = gatewayCompId.toCharArray();
     }
 
-    public boolean validate(final HeaderDecoder header)
+    public boolean validate(final SessionHeaderDecoder header)
     {
         return CodecUtil.equals(gatewayCompId, header.targetCompID(), header.targetCompIDLength());
     }
 
     public int invalidTagId()
     {
-        return Constants.TARGET_COMP_ID;
+        return SessionConstants.TARGET_COMP_ID;
     }
 
     public int rejectReason()

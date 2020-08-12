@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -36,8 +36,12 @@ public class CharArrayMapTest
         final CharArrayMap<String> charArrayMap = new CharArrayMap<>(buildFrom);
 
         //When / Then
-        assertTrue(charArrayMap.containsKey(new char[] {'0', ' ', 'A', 'A'}, 0, 1));
-        assertTrue(charArrayMap.containsKey(new char[] {'0', ' ', 'A', 'A'}, 2, 2));
+        final char[] data = {'0', ' ', 'A', 'A'};
+        final CharArrayWrapper wrapper = new CharArrayWrapper();
+        wrapper.wrap(data, 0, 1);
+        assertTrue(charArrayMap.containsKey(wrapper));
+        wrapper.wrap(data, 2, 2);
+        assertTrue(charArrayMap.containsKey(wrapper));
     }
 
     @Test
@@ -51,6 +55,9 @@ public class CharArrayMapTest
         final CharArrayMap<String> charArrayMap = new CharArrayMap<>(buildFrom);
 
         //When / Then
-        assertFalse(charArrayMap.containsKey(new char[] {'0', ' ', 'A', 'B'}, 2, 2));
+        final char[] data = {'0', ' ', 'A', 'B'};
+        final CharArrayWrapper wrapper = new CharArrayWrapper();
+        wrapper.wrap(data, 2, 2);
+        assertFalse(charArrayMap.containsKey(wrapper));
     }
 }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,25 +16,26 @@
 package uk.co.real_logic.artio.engine.logger;
 
 import uk.co.real_logic.artio.DebugLogger;
-import uk.co.real_logic.artio.LogTag;
-import uk.co.real_logic.artio.messages.FixMessageDecoder;
+import uk.co.real_logic.artio.util.CharFormatter;
 
-import java.util.function.Predicate;
-
+import static uk.co.real_logic.artio.LogTag.INDEX;
 import static uk.co.real_logic.artio.dictionary.generation.CodecUtil.MISSING_LONG;
 
 public final class RecordingRange
 {
+    private static final ThreadLocal<CharFormatter> CURRENT_POSITION =
+        ThreadLocal.withInitial(() -> new CharFormatter("currentPosition == addPosition, %s%n"));
+
     final long recordingId;
-    final Predicate<FixMessageDecoder> msgPredicate;
+    final long sessionId;
     long position = MISSING_LONG;
     int length;
     int count;
 
-    RecordingRange(final long recordingId, final Predicate<FixMessageDecoder> msgPredicate)
+    RecordingRange(final long recordingId, final long sessionId)
     {
         this.recordingId = recordingId;
-        this.msgPredicate = msgPredicate;
+        this.sessionId = sessionId;
         this.count = 0;
     }
 
@@ -66,7 +67,10 @@ public final class RecordingRange
         }
         else
         {
-            DebugLogger.log(LogTag.INDEX, "currentPosition == addPosition, %d", currentPosition);
+            if (DebugLogger.isEnabled(INDEX))
+            {
+                DebugLogger.log(INDEX, CURRENT_POSITION.get().clear().with(currentPosition));
+            }
         }
     }
 
@@ -75,6 +79,7 @@ public final class RecordingRange
     {
         return "RecordingRange{" +
             "recordingId=" + recordingId +
+            ", sessionId=" + sessionId +
             ", position=" + position +
             ", length=" + length +
             ", count=" + count +

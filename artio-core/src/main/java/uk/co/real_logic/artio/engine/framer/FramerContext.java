@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -19,11 +19,13 @@ import io.aeron.Image;
 import org.agrona.ErrorHandler;
 import org.agrona.LangUtil;
 import org.agrona.concurrent.*;
+import uk.co.real_logic.artio.CommonConfiguration;
 import uk.co.real_logic.artio.FixCounters;
 import uk.co.real_logic.artio.Reply;
 import uk.co.real_logic.artio.engine.EngineConfiguration;
 import uk.co.real_logic.artio.engine.EngineContext;
 import uk.co.real_logic.artio.engine.RecordingCoordinator;
+import uk.co.real_logic.artio.engine.SessionInfo;
 import uk.co.real_logic.artio.engine.logger.SequenceNumberIndexReader;
 import uk.co.real_logic.artio.protocol.GatewayPublication;
 import uk.co.real_logic.artio.protocol.Streams;
@@ -38,16 +40,19 @@ import java.util.List;
  * Context that injects all the necessary information into different Framer classes.
  *
  * This enables many classes in the framer package to be package scoped as they don't
- * need the Fix Engine itself to touch them.
+ * need the Fix Engine itself to touch them. This isn't considered part of the public API
+ * and shouldn't be relied upon by Artio users.
  */
 public class FramerContext
 {
-    private static final int ADMIN_COMMAND_CAPACITY = 16;
+    private static final int ADMIN_COMMAND_CAPACITY = 64;
 
     private final QueuedPipe<AdminCommand> adminCommands = new ManyToOneConcurrentArrayQueue<>(ADMIN_COMMAND_CAPACITY);
+    private final SystemEpochClock epochClock = new SystemEpochClock();
 
     private final Framer framer;
 
+    private final EngineConfiguration configuration;
     private final GatewaySessions gatewaySessions;
     private final SequenceNumberIndexReader sentSequenceNumberIndex;
     private final SequenceNumberIndexReader receivedSequenceNumberIndex;
@@ -66,37 +71,41 @@ public class FramerContext
         final AgentInvoker conductorAgentInvoker,
         final RecordingCoordinator recordingCoordinator)
     {
+        this.configuration = configuration;
+
         final SessionIdStrategy sessionIdStrategy = configuration.sessionIdStrategy();
-        this.sessionContexts = new SessionContexts(configuration.sessionIdBuffer(), sessionIdStrategy, errorHandler);
+
         final IdleStrategy idleStrategy = configuration.framerIdleStrategy();
         final Streams outboundLibraryStreams = engineContext.outboundLibraryStreams();
 
-        final SystemEpochClock clock = new SystemEpochClock();
+        this.sessionContexts = new SessionContexts(
+            configuration.sessionIdBuffer(), sessionIdStrategy, configuration.initialSequenceIndex(), errorHandler);
+
         this.inboundPublication = engineContext.inboundPublication();
-        this.outboundPublication = outboundLibraryStreams.gatewayPublication(idleStrategy, "outboundPublication");
+        this.outboundPublication = outboundLibraryStreams.gatewayPublication(idleStrategy,
+            outboundLibraryStreams.dataPublication("outboundPublication"));
 
         sentSequenceNumberIndex = new SequenceNumberIndexReader(
-            configuration.sentSequenceNumberBuffer(), errorHandler);
+            configuration.sentSequenceNumberBuffer(), errorHandler, recordingCoordinator.framerOutboundLookup(),
+            configuration.logFileDir());
         receivedSequenceNumberIndex = new SequenceNumberIndexReader(
-            configuration.receivedSequenceNumberBuffer(), errorHandler);
+            configuration.receivedSequenceNumberBuffer(), errorHandler, recordingCoordinator.framerInboundLookup(),
+            null);
 
         gatewaySessions = new GatewaySessions(
-            clock,
+            epochClock,
+            inboundPublication,
             outboundPublication,
             sessionIdStrategy,
             configuration.sessionCustomisationStrategy(),
             fixCounters,
-            configuration.authenticationStrategy(),
-            configuration.messageValidationStrategy(),
-            configuration.sessionBufferSize(),
-            configuration.sendingTimeWindowInMs(),
-            configuration.reasonableTransmissionTimeInMs(),
-            configuration.logAllMessages(),
+            configuration,
             errorHandler,
             sessionContexts,
             configuration.sessionPersistenceStrategy(),
             sentSequenceNumberIndex,
-            receivedSequenceNumberIndex);
+            receivedSequenceNumberIndex,
+            configuration.sessionEpochFractionFormat());
 
         final EndPointFactory endPointFactory = new EndPointFactory(
             configuration,
@@ -105,12 +114,13 @@ public class FramerContext
             fixCounters,
             errorHandler,
             gatewaySessions,
-            engineContext.senderSequenceNumbers());
+            engineContext.senderSequenceNumbers(),
+            configuration.messageTimingHandler());
 
         final FinalImagePositions finalImagePositions = new FinalImagePositions();
 
         framer = new Framer(
-            clock,
+            epochClock,
             timers.outboundTimer(),
             timers.sendTimer(),
             configuration,
@@ -124,7 +134,7 @@ public class FramerContext
             engineContext.inboundReplayQuery(),
             outboundPublication,
             inboundPublication,
-            adminCommands,
+            this.adminCommands,
             sessionIdStrategy,
             sessionContexts,
             sentSequenceNumberIndex,
@@ -165,7 +175,8 @@ public class FramerContext
             receivedSequenceNumberIndex,
             sentSequenceNumberIndex,
             inboundPublication,
-            outboundPublication);
+            outboundPublication,
+            epochClock.time());
 
         if (adminCommands.offer(reply))
         {
@@ -175,7 +186,7 @@ public class FramerContext
         return null;
     }
 
-    public Reply<?> resetSessionIds(final File backupLocation, final IdleStrategy idleStrategy)
+    public Reply<?> resetSessionIds(final File backupLocation)
     {
         if (backupLocation != null && !backupLocation.exists())
         {
@@ -201,6 +212,28 @@ public class FramerContext
         return null;
     }
 
+    public void startClose()
+    {
+        final IdleStrategy idleStrategy = CommonConfiguration.backoffIdleStrategy();
+        final DisconnectAllCommand command = new DisconnectAllCommand();
+        while (!adminCommands.offer(command))
+        {
+            idleStrategy.idle();
+        }
+        idleStrategy.reset();
+
+        while (!command.hasCompleted())
+        {
+            idleStrategy.idle();
+        }
+        idleStrategy.reset();
+
+        if (command.hasErrored())
+        {
+            LangUtil.rethrowUnchecked(command.error());
+        }
+    }
+
     public Reply<Long> lookupSessionId(
         final String localCompId,
         final String remoteCompId,
@@ -224,4 +257,45 @@ public class FramerContext
 
         return null;
     }
+
+    public Reply<?> bind()
+    {
+        final BindCommand command = new BindCommand();
+
+        if (!configuration.hasBindAddress())
+        {
+            command.onError(new IllegalStateException("Missing address: EngineConfiguration.bindTo()"));
+            return command;
+        }
+
+        if (adminCommands.offer(command))
+        {
+            return command;
+        }
+
+        return null;
+    }
+
+    public Reply<?> unbind(final boolean disconnect)
+    {
+        final UnbindCommand command = new UnbindCommand(disconnect);
+
+        if (adminCommands.offer(command))
+        {
+            return command;
+        }
+
+        return null;
+    }
+
+    public boolean offer(final AdminCommand command)
+    {
+        return adminCommands.offer(command);
+    }
+
+    public List<SessionInfo> allSessions()
+    {
+        return sessionContexts.allSessions();
+    }
+
 }

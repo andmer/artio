@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -37,8 +37,6 @@ public class MediaDriverRestartTest extends AbstractGatewayToGatewaySystemTest
     @Before
     public void launch()
     {
-        delete(ACCEPTOR_LOGS);
-
         start(true);
     }
 
@@ -71,6 +69,7 @@ public class MediaDriverRestartTest extends AbstractGatewayToGatewaySystemTest
 
         final EngineConfiguration acceptingConfig = acceptingConfig(
             port, ACCEPTOR_ID, INITIATOR_ID);
+        acceptingConfig.deleteLogFileDirOnStart(true);
         acceptingConfig.aeronContext().driverTimeoutMs(DRIVER_TIMEOUT_MS);
 
         acceptingEngine = FixEngine.launch(acceptingConfig);
@@ -86,7 +85,6 @@ public class MediaDriverRestartTest extends AbstractGatewayToGatewaySystemTest
 
         final LibraryConfiguration configuration = new LibraryConfiguration()
             .sessionAcquireHandler(initiatingHandler)
-            .sentPositionHandler(initiatingHandler)
             .sessionExistsHandler(initiatingHandler)
             .libraryAeronChannels(singletonList("aeron:udp?endpoint=localhost:" + libraryAeronPort));
         configuration.aeronContext().driverTimeoutMs(DRIVER_TIMEOUT_MS);

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,19 +18,31 @@ package uk.co.real_logic.artio.protocol;
 import io.aeron.logbuffer.ControlledFragmentHandler;
 import io.aeron.logbuffer.Header;
 import org.agrona.DirectBuffer;
+import uk.co.real_logic.artio.dictionary.FixDictionary;
 import uk.co.real_logic.artio.messages.*;
 
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
 
 public final class EngineProtocolSubscription implements ControlledFragmentHandler
 {
+    private static final int FOLLOWER_SESSION_REQUEST_LENGTH =
+        FollowerSessionRequestDecoder.BLOCK_LENGTH + FollowerSessionRequestDecoder.headerHeaderLength();
+    private static final int WRITE_META_DATA_DATA_LENGTH =
+        WriteMetaDataDecoder.BLOCK_LENGTH + WriteMetaDataDecoder.metaDataHeaderLength();
+
     private final MessageHeaderDecoder messageHeader = new MessageHeaderDecoder();
     private final InitiateConnectionDecoder initiateConnection = new InitiateConnectionDecoder();
     private final RequestDisconnectDecoder requestDisconnect = new RequestDisconnectDecoder();
+    private final MidConnectionDisconnectDecoder midConnectionDisconnect = new MidConnectionDisconnectDecoder();
     private final ApplicationHeartbeatDecoder applicationHeartbeat = new ApplicationHeartbeatDecoder();
     private final LibraryConnectDecoder libraryConnect = new LibraryConnectDecoder();
     private final ReleaseSessionDecoder releaseSession = new ReleaseSessionDecoder();
     private final RequestSessionDecoder requestSession = new RequestSessionDecoder();
+    private final FollowerSessionRequestDecoder followerSessionRequest = new FollowerSessionRequestDecoder();
+    private final WriteMetaDataDecoder writeMetaData = new WriteMetaDataDecoder();
+    private final ReadMetaDataDecoder readMetaData = new ReadMetaDataDecoder();
+    private final ReplayMessagesDecoder replayMessages = new ReplayMessagesDecoder();
+    private final InitiateILinkConnectionDecoder initiateILinkConnection = new InitiateILinkConnectionDecoder();
 
     private final EngineEndPointHandler handler;
 
@@ -78,6 +90,36 @@ public final class EngineProtocolSubscription implements ControlledFragmentHandl
             case RequestSessionDecoder.TEMPLATE_ID:
             {
                 return onRequestSession(buffer, offset, blockLength, version, header);
+            }
+
+            case MidConnectionDisconnectDecoder.TEMPLATE_ID:
+            {
+                return onMidConnectionDisconnect(buffer, offset, blockLength, version, header);
+            }
+
+            case FollowerSessionRequestDecoder.TEMPLATE_ID:
+            {
+                return onFollowerSessionRequest(buffer, offset, blockLength, version, header);
+            }
+
+            case WriteMetaDataDecoder.TEMPLATE_ID:
+            {
+                return onWriteMetaData(buffer, offset, blockLength, version, header);
+            }
+
+            case ReadMetaDataDecoder.TEMPLATE_ID:
+            {
+                return onReadMetaData(buffer, offset, blockLength, version, header);
+            }
+
+            case ReplayMessagesDecoder.TEMPLATE_ID:
+            {
+                return onReplayMessages(buffer, offset, blockLength, version, header);
+            }
+
+            case InitiateILinkConnectionDecoder.TEMPLATE_ID:
+            {
+                return onInitiateILinkConnection(buffer, offset, blockLength, version, header);
             }
         }
 
@@ -180,6 +222,7 @@ public final class EngineProtocolSubscription implements ControlledFragmentHandl
         {
             return action; // Continue processing messages, but don't process this message.
         }
+
         return handler.onInitiateConnection(
             libraryId,
             initiateConnection.port(),
@@ -200,6 +243,7 @@ public final class EngineProtocolSubscription implements ControlledFragmentHandl
             initiateConnection.enableLastMsgSeqNumProcessed() == Bool.TRUE,
             initiateConnection.username(),
             initiateConnection.password(),
+            FixDictionary.find(initiateConnection.fixDictionary()),
             initiateConnection.heartbeatIntervalInS(),
             initiateConnection.correlationId(),
             header
@@ -225,4 +269,143 @@ public final class EngineProtocolSubscription implements ControlledFragmentHandl
             requestDisconnect.connection(),
             requestDisconnect.reason());
     }
+
+    private Action onMidConnectionDisconnect(
+        final DirectBuffer buffer,
+        final int offset,
+        final int blockLength,
+        final int version,
+        final Header header)
+    {
+        midConnectionDisconnect.wrap(buffer, offset, blockLength, version);
+        final int libraryId = midConnectionDisconnect.libraryId();
+        final Action action = handler.onApplicationHeartbeat(libraryId, header.sessionId());
+        if (action != null)
+        {
+            return action; // Continue processing messages, but not this message.
+        }
+        return handler.onMidConnectionDisconnect(
+            libraryId,
+            midConnectionDisconnect.correlationId());
+    }
+
+    private Action onFollowerSessionRequest(
+        final DirectBuffer buffer,
+        final int offset,
+        final int blockLength,
+        final int version,
+        final Header header)
+    {
+        followerSessionRequest.wrap(buffer, offset, blockLength, version);
+        final int libraryId = followerSessionRequest.libraryId();
+        final Action action = handler.onApplicationHeartbeat(libraryId, header.sessionId());
+        if (action != null)
+        {
+            return action; // Continue processing messages, but not this message.
+        }
+        final int messageLength = followerSessionRequest.headerLength();
+        return handler.onFollowerSessionRequest(
+            libraryId,
+            followerSessionRequest.correlationId(),
+            buffer,
+            offset + FOLLOWER_SESSION_REQUEST_LENGTH,
+            messageLength,
+            header);
+    }
+
+    private Action onWriteMetaData(
+        final DirectBuffer buffer,
+        final int offset,
+        final int blockLength,
+        final int version,
+        final Header header)
+    {
+        writeMetaData.wrap(buffer, offset, blockLength, version);
+        final int libraryId = writeMetaData.libraryId();
+        final Action action = handler.onApplicationHeartbeat(libraryId, header.sessionId());
+        if (action != null)
+        {
+            return action; // Continue processing messages, but not this message.
+        }
+        final int metaDataLength = writeMetaData.metaDataLength();
+        return handler.onWriteMetaData(
+            libraryId,
+            writeMetaData.session(),
+            writeMetaData.correlationId(),
+            writeMetaData.metaDataOffset(),
+            buffer,
+            offset + WRITE_META_DATA_DATA_LENGTH,
+            metaDataLength);
+    }
+
+    private Action onReadMetaData(
+        final DirectBuffer buffer,
+        final int offset,
+        final int blockLength,
+        final int version,
+        final Header header)
+    {
+        readMetaData.wrap(buffer, offset, blockLength, version);
+        final int libraryId = readMetaData.libraryId();
+        final Action action = handler.onApplicationHeartbeat(libraryId, header.sessionId());
+        if (action != null)
+        {
+            return action; // Continue processing messages, but not this message.
+        }
+        return handler.onReadMetaData(
+            libraryId,
+            readMetaData.session(),
+            readMetaData.correlationId());
+    }
+
+    private Action onReplayMessages(
+        final DirectBuffer buffer,
+        final int offset,
+        final int blockLength,
+        final int version,
+        final Header header)
+    {
+        replayMessages.wrap(buffer, offset, blockLength, version);
+        final int libraryId = replayMessages.libraryId();
+        final Action action = handler.onApplicationHeartbeat(libraryId, header.sessionId());
+        if (action != null)
+        {
+            return action; // Continue processing messages, but not this message.
+        }
+        return handler.onReplayMessages(
+            libraryId,
+            replayMessages.session(),
+            replayMessages.correlationId(),
+            replayMessages.replayFromSequenceNumber(),
+            replayMessages.replayToSequenceIndex(),
+            replayMessages.replayToSequenceNumber(),
+            replayMessages.replayToSequenceIndex(),
+            replayMessages.latestReplyArrivalTimeInMs());
+    }
+
+    private Action onInitiateILinkConnection(
+        final DirectBuffer buffer,
+        final int offset,
+        final int blockLength,
+        final int version,
+        final Header header)
+    {
+        initiateILinkConnection.wrap(buffer, offset, blockLength, version);
+        final int libraryId = initiateILinkConnection.libraryId();
+        final Action action = handler.onApplicationHeartbeat(libraryId, header.sessionId());
+        if (action != null)
+        {
+            return action; // Continue processing messages, but not this message.
+        }
+        return handler.onInitiateILinkConnection(
+            libraryId,
+            initiateILinkConnection.port(),
+            initiateILinkConnection.correlationId(),
+            initiateILinkConnection.reestablishConnection() == Bool.TRUE,
+            initiateILinkConnection.useBackupHost() == Bool.TRUE,
+            initiateILinkConnection.host(),
+            initiateILinkConnection.accessKeyId(),
+            initiateILinkConnection.backupHost());
+    }
+
 }

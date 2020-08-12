@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,9 +16,12 @@
 package uk.co.real_logic.artio.fields;
 
 import org.junit.Test;
+import uk.co.real_logic.artio.util.AsciiBuffer;
+import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
+import static java.nio.charset.StandardCharsets.US_ASCII;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
-import static org.junit.Assert.assertThat;
 
 public class DecimalFloatTest
 {
@@ -44,73 +47,45 @@ public class DecimalFloatTest
     @Test
     public void compareToOrdersIntegers()
     {
-        assertThat(ZERO, lessThan(FIVE));
-        assertThat(FIVE, greaterThan(ZERO));
-
-        assertThat(MINUS_FIVE, lessThan(ZERO));
-        assertThat(ZERO, greaterThan(MINUS_FIVE));
-
-        assertThat(MINUS_FIVE, lessThan(FIVE));
-        assertThat(FIVE, greaterThan(MINUS_FIVE));
+        assertOrderWithNegatives(ZERO, FIVE);
+        assertOrderWithNegatives(MINUS_FIVE, FIVE);
     }
 
     @Test
     public void compareToOrdersFloatsOfSameScale()
     {
-        assertThat(POINT_ONE, lessThan(FIVE_POINT_FIVE));
-        assertThat(FIVE_POINT_FIVE, greaterThan(POINT_ONE));
-
-        assertThat(MINUS_FIVE_POINT_FIVE, lessThan(POINT_ONE));
-        assertThat(POINT_ONE, greaterThan(MINUS_FIVE_POINT_FIVE));
-
-        assertThat(MINUS_FIVE_POINT_FIVE, lessThan(FIVE));
-        assertThat(FIVE_POINT_FIVE, greaterThan(MINUS_FIVE_POINT_FIVE));
+        assertOrderWithNegatives(POINT_ONE, FIVE_POINT_FIVE);
+        assertOrderWithNegatives(MINUS_FIVE_POINT_FIVE, POINT_ONE);
+        assertOrderWithNegatives(MINUS_FIVE_POINT_FIVE, FIVE);
     }
 
     @Test
     public void compareToOrdersFloatsWithIntegers()
     {
-        assertThat(ZERO, lessThan(POINT_ONE));
-        assertThat(POINT_ONE, greaterThan(ZERO));
-
-        assertThat(MINUS_FIVE_POINT_FIVE, lessThan(ZERO));
-        assertThat(ZERO, greaterThan(MINUS_FIVE_POINT_FIVE));
-
-        assertThat(MINUS_FIVE_POINT_FIVE, lessThan(FIVE));
-        assertThat(FIVE, greaterThan(MINUS_FIVE_POINT_FIVE));
+        assertOrderWithNegatives(ZERO, POINT_ONE);
+        assertOrderWithNegatives(MINUS_FIVE_POINT_FIVE, ZERO);
+        assertOrderWithNegatives(MINUS_FIVE_POINT_FIVE, FIVE);
     }
 
     @Test
     public void compareToOrdersFloatsOfDifferentScale()
     {
-        assertThat(new DecimalFloat(45, 2), lessThan(new DecimalFloat(45, 1)));
-        assertThat(new DecimalFloat(45, 1), greaterThan(new DecimalFloat(45, 2)));
-
-        assertThat(new DecimalFloat(-45, 2), greaterThan(new DecimalFloat(-45, 1)));
-        assertThat(new DecimalFloat(-45, 1), lessThan(new DecimalFloat(-45, 2)));
-
-        assertThat(new DecimalFloat(45, 2), greaterThan(new DecimalFloat(-45, 1)));
-        assertThat(new DecimalFloat(-45, 1), lessThan(new DecimalFloat(45, 2)));
-
-        assertThat(new DecimalFloat(9, 2), lessThan(POINT_ONE));
-        assertThat(POINT_ONE, greaterThan(new DecimalFloat(9, 2)));
+        assertOrderWithNegatives(new DecimalFloat(45, 2), new DecimalFloat(45, 1));
+        assertOrderWithNegatives(new DecimalFloat(9, 2), POINT_ONE);
     }
 
     @Test
     public void compareToOrdersFloatsOfDifferentScaleVsZero()
     {
-        assertThat(ZERO, greaterThan(new DecimalFloat(-45, 1)));
-        assertThat(new DecimalFloat(-45, 1), lessThan(ZERO));
-
-        assertThat(new DecimalFloat(45, 2), greaterThan(ZERO));
-        assertThat(ZERO, lessThan(new DecimalFloat(45, 2)));
+        assertOrderWithNegatives(ZERO, new DecimalFloat(45, 1));
+        assertOrderWithNegatives(ZERO, new DecimalFloat(45, 2));
     }
 
     @Test
     public void compareToOrderFloatsOfDifferentScaleWithMultiDigitValues()
     {
-        assertThat(new DecimalFloat(54321, 2), lessThan(new DecimalFloat(543219, 3)));
-        assertThat(new DecimalFloat(543219, 3), greaterThan(new DecimalFloat(54321, 2)));
+        assertOrderWithNegatives(new DecimalFloat(54321, 2), new DecimalFloat(543219, 3));
+        assertOrderWithNegatives(new DecimalFloat(54321, 2), new DecimalFloat(5433, 1));
     }
 
     @Test
@@ -122,5 +97,77 @@ public class DecimalFloatTest
         assertThat(new DecimalFloat(5000, 0), equalTo(new DecimalFloat(500000, 2)));
         assertThat(new DecimalFloat(5000, 0), equalTo(new DecimalFloat(50, -2)));
         assertThat(new DecimalFloat(1234, 2), equalTo(new DecimalFloat(123400, 4)));
+    }
+
+    @Test(expected = NumberFormatException.class)
+    public void shouldNotConvertInvalidStringIntoANumber()
+    {
+        new DecimalFloat().fromString("ABC");
+    }
+
+    @Test(expected = ArithmeticException.class)
+    public void shouldNotParseValueOutOfRange()
+    {
+        new DecimalFloat().fromString("10000000000000000000000");
+    }
+
+    // Bug reproduction testcase
+    @Test(expected = ArithmeticException.class)
+    public void shouldNotParseOverflowingValue()
+    {
+        new DecimalFloat().fromString("99999999999999990000000");
+    }
+
+    @Test
+    public void parseZeroDecimalFloat()
+    {
+        assertThat(new DecimalFloat(0, 0), equalTo(new DecimalFloat().fromString("0")));
+    }
+
+    // Bug reproduction testcase
+    @Test(expected = ArithmeticException.class)
+    public void shouldNotDecodeOverflowingValue()
+    {
+        parseNumberFromBuffer("99999999999999990000000");
+    }
+
+    @Test(expected = ArithmeticException.class)
+    public void shouldNotDecodeValueOutOfRange()
+    {
+        parseNumberFromBuffer("10000000000000000000000");
+    }
+
+    @Test(expected = IllegalArgumentException.class)
+    public void shouldNotEncodeAnInvalidValue()
+    {
+        final MutableAsciiBuffer buffer = new MutableAsciiBuffer(new byte[1000]);
+        buffer.putFloatAscii(0, DecimalFloat.NAN);
+    }
+
+    private void parseNumberFromBuffer(final String number)
+    {
+        final AsciiBuffer buffer = new MutableAsciiBuffer(number.getBytes(US_ASCII));
+        buffer.getFloat(new DecimalFloat(), 0, buffer.capacity());
+    }
+
+    private void assertOrderWithNegatives(final DecimalFloat lesser, final DecimalFloat greater)
+    {
+        assertOrder(lesser, greater);
+
+        final DecimalFloat negativeLesser = lesser.copy().negate();
+        final DecimalFloat negativeGreater = greater.copy().negate();
+
+        if (lesser.value() >= 0 && greater.value() >= 0)
+        {
+            assertOrder(negativeGreater, lesser);
+        }
+
+        assertOrder(negativeGreater, negativeLesser);
+    }
+
+    private void assertOrder(final DecimalFloat lesser, final DecimalFloat greater)
+    {
+        assertThat(lesser, lessThan(greater));
+        assertThat(greater, greaterThan(lesser));
     }
 }

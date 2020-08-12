@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,15 +22,17 @@ import org.agrona.ErrorHandler;
 import org.agrona.concurrent.status.AtomicCounter;
 import uk.co.real_logic.artio.DebugLogger;
 import uk.co.real_logic.artio.engine.ByteBufferUtil;
+import uk.co.real_logic.artio.engine.MessageTimingHandler;
 import uk.co.real_logic.artio.engine.SenderSequenceNumber;
 import uk.co.real_logic.artio.engine.logger.ArchiveDescriptor;
 import uk.co.real_logic.artio.messages.DisconnectReason;
+import uk.co.real_logic.artio.messages.MessageHeaderDecoder;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
 
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
-import static uk.co.real_logic.artio.LogTag.FIX_MESSAGE;
+import static uk.co.real_logic.artio.LogTag.FIX_MESSAGE_TCP;
 import static uk.co.real_logic.artio.engine.FixEngine.ENGINE_LIBRARY_ID;
 import static uk.co.real_logic.artio.messages.DisconnectReason.EXCEPTION;
 import static uk.co.real_logic.artio.messages.DisconnectReason.SLOW_CONSUMER;
@@ -38,6 +40,9 @@ import static uk.co.real_logic.artio.protocol.GatewayPublication.FRAME_SIZE;
 
 class SenderEndPoint
 {
+    private static final int HEADER_LENGTH = MessageHeaderDecoder.ENCODED_LENGTH;
+    private static final int REPLAY_MESSAGE = -1;
+
     private final long connectionId;
     private final TcpChannel channel;
     private final AtomicCounter bytesInBuffer;
@@ -49,6 +54,7 @@ class SenderEndPoint
     private final StreamTracker outboundTracker;
     private final StreamTracker replayTracker;
     private final SenderSequenceNumber senderSequenceNumber;
+    private final MessageTimingHandler messageTimingHandler;
 
     private int libraryId;
     private long sessionId;
@@ -68,7 +74,8 @@ class SenderEndPoint
         final int maxBytesInBuffer,
         final long slowConsumerTimeoutInMs,
         final long timeInMs,
-        final SenderSequenceNumber senderSequenceNumber)
+        final SenderSequenceNumber senderSequenceNumber,
+        final MessageTimingHandler messageTimingHandler)
     {
         this.connectionId = connectionId;
         this.libraryId = libraryId;
@@ -83,6 +90,7 @@ class SenderEndPoint
 
         outboundTracker = new StreamTracker(outboundBlockablePosition);
         replayTracker = new StreamTracker(replayBlockablePosition);
+        this.messageTimingHandler = messageTimingHandler;
         sendingTimeoutTimeInMs = timeInMs + slowConsumerTimeoutInMs;
     }
 
@@ -108,7 +116,11 @@ class SenderEndPoint
             return;
         }
 
-        attemptFramedMessage(directBuffer, offset, bodyLength, timeInMs, position, outboundTracker);
+        if (attemptFramedMessage(directBuffer, offset, bodyLength, timeInMs, position, outboundTracker) &&
+            messageTimingHandler != null)
+        {
+            messageTimingHandler.onMessage(sequenceNumber, connectionId);
+        }
 
         senderSequenceNumber.onNewMessage(sequenceNumber);
     }
@@ -135,20 +147,23 @@ class SenderEndPoint
         final int offset,
         final int bodyLength,
         final long timeInMs,
-        final long position)
+        final long position,
+        final int metaDataLength)
     {
         if (!outboundTracker.partiallySentMessage)
         {
             replayPaused = true;
         }
 
-        final int offsetAfterHeader = offset - FRAME_SIZE;
-        final int length = bodyLength + FRAME_SIZE;
+        final int totalFrameSize = FRAME_SIZE + metaDataLength;
+        final int offsetAfterHeader = offset - totalFrameSize;
+        final int length = bodyLength + totalFrameSize;
 
-        return attemptSlowMessage(buffer, offsetAfterHeader, length, position, bodyLength, timeInMs, replayTracker);
+        return attemptSlowMessage(buffer, offsetAfterHeader, length, position, bodyLength, timeInMs, replayTracker,
+            metaDataLength, REPLAY_MESSAGE);
     }
 
-    private void attemptFramedMessage(
+    private boolean attemptFramedMessage(
         final DirectBuffer directBuffer,
         final int offset,
         final int bodyLength,
@@ -160,7 +175,7 @@ class SenderEndPoint
         {
             dropFurtherBehind(bodyLength);
 
-            return;
+            return false;
         }
 
         try
@@ -174,12 +189,15 @@ class SenderEndPoint
             else
             {
                 tracker.sentPosition = position;
+                return true;
             }
         }
         catch (final IOException ex)
         {
             onError(ex);
         }
+
+        return false;
     }
 
     private void dropFurtherBehind(final int bodyLength)
@@ -201,12 +219,21 @@ class SenderEndPoint
         throws IOException
     {
         final ByteBuffer buffer = directBuffer.byteBuffer();
+        final int startLimit = buffer.limit();
+        final int startPosition = buffer.position();
+
         ByteBufferUtil.limit(buffer, offset + length);
         ByteBufferUtil.position(buffer, offset);
 
         final int written = channel.write(buffer);
-        DebugLogger.log(FIX_MESSAGE, "Written  %s%n", buffer, written);
-        updateSendingTimeoutTimeInMs(timeInMs, written);
+        if (written > 0)
+        {
+            ByteBufferUtil.position(buffer, offset);
+            DebugLogger.log(FIX_MESSAGE_TCP, "Written  ", buffer, written);
+            updateSendingTimeoutTimeInMs(timeInMs, written);
+
+            buffer.limit(startLimit).position(startPosition);
+        }
 
         return written;
     }
@@ -269,6 +296,7 @@ class SenderEndPoint
 
     public void close()
     {
+        senderSequenceNumber.close();
         bytesInBuffer.close();
         invalidLibraryAttempts.close();
     }
@@ -280,7 +308,9 @@ class SenderEndPoint
         final long position,
         final int bodyLength,
         final int libraryId,
-        final long timeInMs)
+        final long timeInMs,
+        final int metaDataLength,
+        final int sequenceNumber)
     {
         if (isWrongLibraryId(libraryId))
         {
@@ -294,7 +324,8 @@ class SenderEndPoint
         }
 
         return attemptSlowMessage(
-            directBuffer, offsetAfterHeader, length, position, bodyLength, timeInMs, outboundTracker);
+            directBuffer, offsetAfterHeader, length, position, bodyLength, timeInMs, outboundTracker, metaDataLength,
+            sequenceNumber);
     }
 
     private Action attemptSlowMessage(
@@ -304,7 +335,9 @@ class SenderEndPoint
         final long position,
         final int bodyLength,
         final long timeInMs,
-        final StreamTracker tracker)
+        final StreamTracker tracker,
+        final int metaDataLength,
+        final int sequenceNumber)
     {
         if (!isSlowConsumer())
         {
@@ -350,7 +383,7 @@ class SenderEndPoint
                 bytesPreviouslySent = bodyLength - remainingLength;
             }
 
-            final int dataOffset = offsetAfterHeader + FRAME_SIZE + bytesPreviouslySent;
+            final int dataOffset = offsetAfterHeader + FRAME_SIZE + metaDataLength + bytesPreviouslySent;
             final ByteBuffer buffer = directBuffer.byteBuffer();
 
             ByteBufferUtil.limit(buffer, dataOffset + remainingLength);
@@ -363,7 +396,7 @@ class SenderEndPoint
 
             if (bodyLength > (written + bytesPreviouslySent))
             {
-                tracker.moveSentPosition(written);
+                tracker.sentPosition = (position - remainingLength) + written;
                 return blockPosition(position, length, tracker);
             }
             else
@@ -371,6 +404,11 @@ class SenderEndPoint
                 tracker.sentPosition = position;
                 tracker.partiallySentMessage = false;
                 tracker.skipPosition = Long.MAX_VALUE;
+
+                if (sequenceNumber != REPLAY_MESSAGE && messageTimingHandler != null)
+                {
+                    messageTimingHandler.onMessage(sequenceNumber, connectionId);
+                }
 
                 if (!isSlowConsumer())
                 {
@@ -386,12 +424,13 @@ class SenderEndPoint
         return CONTINUE;
     }
 
-    private Action blockPosition(final long position, final int length, final StreamTracker tracker)
+    private Action blockPosition(final long messagePosition, final int messageLength, final StreamTracker tracker)
     {
-        final int alignedLength = ArchiveDescriptor.alignTerm(length);
-        final long startPosition = position - (alignedLength + DataHeaderFlyweight.HEADER_LENGTH);
-        tracker.blockablePosition.blockPosition(startPosition);
-        tracker.skipPosition = position;
+        final int frameLength = DataHeaderFlyweight.HEADER_LENGTH + messageLength + HEADER_LENGTH;
+        final int alignedLength = ArchiveDescriptor.alignTerm(frameLength);
+        final long messageStartPosition = messagePosition - alignedLength;
+        tracker.blockablePosition.blockPosition(messageStartPosition);
+        tracker.skipPosition = messagePosition;
         return Action.CONTINUE;
     }
 
@@ -475,11 +514,6 @@ class SenderEndPoint
         StreamTracker(final BlockablePosition blockablePosition)
         {
             this.blockablePosition = blockablePosition;
-        }
-
-        void moveSentPosition(final int delta)
-        {
-            sentPosition += delta;
         }
     }
 

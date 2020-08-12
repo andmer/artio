@@ -1,11 +1,11 @@
 /*
- * Copyright 2013 Real Logic Ltd.
+ * Copyright 2013 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,35 +17,19 @@ package uk.co.real_logic.artio.dictionary.generation;
 
 import org.agrona.LangUtil;
 import org.agrona.concurrent.Agent;
-import org.agrona.generation.ResourceConsumer;
 
-import java.io.IOException;
+import java.io.ByteArrayOutputStream;
+import java.io.PrintStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.Consumer;
 import java.util.stream.Stream;
 
 import static java.util.stream.Collectors.toList;
 
 public final class Exceptions
 {
-    public static <T> Consumer<T> rethrown(final ResourceConsumer<T> consumer)
-    {
-        return
-            (t) ->
-            {
-                try
-                {
-                    consumer.accept(t);
-                }
-                catch (final IOException ex)
-                {
-                    LangUtil.rethrowUnchecked(ex);
-                }
-            };
-    }
 
     /**
      * Close all closeables in closeables. If any of them throw then throw that exception.
@@ -119,6 +103,7 @@ public final class Exceptions
         }
         catch (final Exception ex)
         {
+            System.out.println(Thread.currentThread().getName());
             ex.printStackTrace(System.out);
         }
     }
@@ -128,5 +113,15 @@ public final class Exceptions
         final String msg = ex.getMessage();
         return msg.contains("Connection reset by peer") ||
                msg.contains("An established connection was aborted");
+    }
+
+    public static String toString(final Throwable throwable)
+    {
+        final ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        try (PrintStream printStream = new PrintStream(bytes))
+        {
+            throwable.printStackTrace(printStream);
+            return bytes.toString();
+        }
     }
 }

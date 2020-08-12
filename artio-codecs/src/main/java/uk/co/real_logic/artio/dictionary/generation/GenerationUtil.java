@@ -1,11 +1,11 @@
 /*
- * Copyright 2013 Real Logic Ltd.
+ * Copyright 2013 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +17,7 @@ package uk.co.real_logic.artio.dictionary.generation;
 
 import org.agrona.Verify;
 
+import java.util.Optional;
 import java.util.stream.Stream;
 
 import static java.lang.Character.isUpperCase;
@@ -25,11 +26,18 @@ import static java.util.stream.Collectors.joining;
 
 public final class GenerationUtil
 {
-    public static final int MESSAGE_TYPE_BITSHIFT = 8;
-    public static final String PARENT_PACKAGE = System.getProperty("PARENT_PACKAGE", "uk.co.real_logic.artio");
+    private static final int MESSAGE_TYPE_BITSHIFT = 8;
+
+    public static final String PARENT_PACKAGE =
+        System.getProperty("fix.codecs.parent_package", "uk.co.real_logic.artio");
+    public static final boolean FLYWEIGHTS_ENABLED = Boolean.getBoolean("fix.codecs.flyweight");
+    public static final Optional<Boolean> HARD_CODED_REJECT_UNKNOWN_EMUM_VALUES =
+        Optional.ofNullable(System.getProperty("reject.unknown.enum.value"))
+        .map(Boolean::parseBoolean);
 
     public static final String ENCODER_PACKAGE = PARENT_PACKAGE + ".builder";
     public static final String DECODER_PACKAGE = PARENT_PACKAGE + ".decoder";
+    public static final String DECODER_FLYWEIGHT_PACKAGE = PARENT_PACKAGE + ".decoder_flyweight";
     public static final String INDENT = "    ";
 
     private GenerationUtil()
@@ -44,14 +52,18 @@ public final class GenerationUtil
             packageName);
     }
 
-    public static int packMessageType(final String representation)
+    public static long packMessageType(final String messageType)
     {
-        int packed = (byte)representation.charAt(0);
-
-        if (representation.length() == 2)
+        if (messageType.length() > 8)
         {
-            final int second = (int)representation.charAt(1);
-            packed |= second << MESSAGE_TYPE_BITSHIFT;
+            throw new IllegalArgumentException("Message types longer than 8 are not supported yet");
+        }
+
+        long packed = 0;
+        for (int index = 0; index < messageType.length(); index++)
+        {
+            final int asciiValue = (byte)messageType.charAt(index);
+            packed |= asciiValue << (MESSAGE_TYPE_BITSHIFT * index);
         }
 
         return packed;
@@ -137,8 +149,13 @@ public final class GenerationUtil
 
     public static String importStaticFor(final Class<?> cls, final String name)
     {
+        return importStaticFor(cls.getCanonicalName(), name);
+    }
+
+    public static String importStaticFor(final String cls, final String name)
+    {
         Verify.notNull(name, "name");
-        return String.format("import static %s.%s;\n", cls.getCanonicalName(), name);
+        return String.format("import static %s.%s;\n", cls, name);
     }
 
     public static String optionalStaticInit(final String containing)

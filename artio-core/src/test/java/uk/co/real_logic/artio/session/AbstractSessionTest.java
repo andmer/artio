@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,16 +18,27 @@ package uk.co.real_logic.artio.session;
 import io.aeron.logbuffer.ControlledFragmentHandler.Action;
 import org.agrona.DirectBuffer;
 import org.agrona.concurrent.status.AtomicCounter;
+import org.junit.Before;
 import org.junit.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 import org.mockito.verification.VerificationMode;
+import uk.co.real_logic.artio.builder.Encoder;
 import uk.co.real_logic.artio.builder.HeaderEncoder;
+import uk.co.real_logic.artio.builder.SessionHeaderEncoder;
 import uk.co.real_logic.artio.builder.TestRequestEncoder;
+import uk.co.real_logic.artio.builder.ExampleMessageEncoder;
+import uk.co.real_logic.artio.decoder.ExampleMessageDecoder;
 import uk.co.real_logic.artio.decoder.SequenceResetDecoder;
+import uk.co.real_logic.artio.dictionary.FixDictionary;
+import uk.co.real_logic.artio.dictionary.SessionConstants;
 import uk.co.real_logic.artio.engine.framer.FakeEpochClock;
+import uk.co.real_logic.artio.fields.UtcTimestampEncoder;
+import uk.co.real_logic.artio.library.OnMessageInfo;
 import uk.co.real_logic.artio.messages.SessionState;
 import uk.co.real_logic.artio.protocol.GatewayPublication;
+import uk.co.real_logic.artio.util.EpochFractionClock;
+import uk.co.real_logic.artio.util.EpochFractionClocks;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
 import static io.aeron.Publication.BACK_PRESSURED;
@@ -35,6 +46,7 @@ import static io.aeron.logbuffer.ControlledFragmentHandler.Action.ABORT;
 import static io.aeron.logbuffer.ControlledFragmentHandler.Action.CONTINUE;
 import static java.util.concurrent.TimeUnit.MINUTES;
 import static java.util.concurrent.TimeUnit.SECONDS;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.lessThanOrEqualTo;
 import static org.junit.Assert.*;
@@ -48,7 +60,7 @@ import static uk.co.real_logic.artio.messages.DisconnectReason.APPLICATION_DISCO
 import static uk.co.real_logic.artio.messages.SessionState.*;
 import static uk.co.real_logic.artio.session.Session.TEST_REQ_ID;
 import static uk.co.real_logic.artio.session.Session.UNKNOWN;
-import static uk.co.real_logic.artio.session.SessionProxy.NO_LAST_MSG_SEQ_NUM_PROCESSED;
+import static uk.co.real_logic.artio.session.DirectSessionProxy.NO_LAST_MSG_SEQ_NUM_PROCESSED;
 
 public abstract class AbstractSessionTest
 {
@@ -59,7 +71,6 @@ public abstract class AbstractSessionTest
     static final long CONNECTION_ID = 3L;
     static final int HEARTBEAT_INTERVAL = 2;
     static final int SESSION_TIMEOUT = HEARTBEAT_INTERVAL + DEFAULT_REASONABLE_TRANSMISSION_TIME_IN_S;
-    static final CompositeKey SESSION_KEY = mock(CompositeKey.class);
     static final int LIBRARY_ID = 4;
     static final int SEQUENCE_INDEX = 0;
 
@@ -67,9 +78,11 @@ public abstract class AbstractSessionTest
 
     static final long POSITION = 1024;
 
-    SessionProxy sessionProxy = mock(SessionProxy.class);
+    OnMessageInfo messageInfo = mock(OnMessageInfo.class);
+    DirectSessionProxy sessionProxy = mock(DirectSessionProxy.class);
     GatewayPublication mockPublication = mock(GatewayPublication.class);
     FakeEpochClock fakeClock = new FakeEpochClock();
+    EpochFractionClock fakeEpochFractionClock = EpochFractionClocks.millisClock(fakeClock);
     AtomicCounter mockReceivedMsgSeqNo = mock(AtomicCounter.class);
     AtomicCounter mockSentMsgSeqNo = mock(AtomicCounter.class);
     SessionIdStrategy idStrategy = mock(SessionIdStrategy.class);
@@ -77,7 +90,7 @@ public abstract class AbstractSessionTest
     ArgumentCaptor<Integer> offsetCaptor = ArgumentCaptor.forClass(Integer.class);
     ArgumentCaptor<Integer> lengthCaptor = ArgumentCaptor.forClass(Integer.class);
     TestRequestEncoder testRequest = new TestRequestEncoder();
-    SessionLogonListener mockLogonListener = mock(SessionLogonListener.class);
+    SessionProcessHandler mockLogonListener = mock(SessionProcessHandler.class);
 
     AbstractSessionTest()
     {
@@ -94,15 +107,28 @@ public abstract class AbstractSessionTest
             offsetCaptor.capture(),
             lengthCaptor.capture(),
             anyInt(),
-            anyInt(),
+            anyLong(),
             anyLong(),
             anyInt(),
             anyLong(),
             any(),
-            anyInt())).thenReturn(POSITION);
+            anyInt(),
+            eq(null),
+            eq(0))).thenReturn(POSITION);
 
-        when(sessionProxy.resendRequest(anyInt(), anyInt(), anyInt(), eq(SEQUENCE_INDEX), anyInt()))
+        when(sessionProxy.sendResendRequest(anyInt(), anyInt(), anyInt(), eq(SEQUENCE_INDEX), anyInt()))
             .thenReturn(POSITION);
+    }
+
+    FixDictionary makeDictionary()
+    {
+        return FixDictionary.of(FixDictionary.findDefault());
+    }
+
+    @Before
+    public void shouldSetupDictionary()
+    {
+        verify(sessionProxy).fixDictionary(any());
     }
 
     @Test
@@ -112,7 +138,7 @@ public abstract class AbstractSessionTest
         session().lastReceivedMsgSeqNum(2);
 
         onMessage(1);
-        verify(sessionProxy).lowSequenceNumberLogout(
+        verify(sessionProxy).sendLowSequenceNumberLogout(
             1, 3, 1, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         verifyDisconnect(times(1));
     }
@@ -137,7 +163,7 @@ public abstract class AbstractSessionTest
 
         final int nextMsgSeqNum = nextMsgSeqNum();
 
-        when(sessionProxy.receivedMessageWithoutSequenceNumber(
+        when(sessionProxy.sendReceivedMessageWithoutSequenceNumber(
             nextMsgSeqNum, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED))
             .thenReturn(BACK_PRESSURED, POSITION);
 
@@ -157,7 +183,7 @@ public abstract class AbstractSessionTest
     private void receivedMessageWithoutSequenceNumber(final int sentMsgSeqNum, final int times)
     {
         verify(sessionProxy, times(times))
-            .receivedMessageWithoutSequenceNumber(sentMsgSeqNum, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+            .sendReceivedMessageWithoutSequenceNumber(sentMsgSeqNum, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
     @Test
@@ -169,7 +195,7 @@ public abstract class AbstractSessionTest
 
         onLogon(heartbeatInterval, 1, false);
 
-        verify(sessionProxy).negativeHeartbeatLogout(1, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendNegativeHeartbeatLogout(1, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
     @Test
@@ -182,7 +208,8 @@ public abstract class AbstractSessionTest
 
         onMessage(2);
 
-        session().onMessage(2, MSG_TYPE_CHARS, sendingTime, origSendingTime, true, true);
+        session().onMessage(
+            2, MSG_TYPE_CHARS, sendingTime, origSendingTime, true, true, POSITION);
 
         verifySendingTimeProblem();
         assertSequenceIndexIs(SEQUENCE_INDEX);
@@ -197,10 +224,10 @@ public abstract class AbstractSessionTest
 
         onMessage(2, true, UNKNOWN);
 
-        verify(sessionProxy).reject(
+        verify(sessionProxy).sendReject(
             2,
             2,
-            MISSING_INT,
+            SessionConstants.ORIG_SENDING_TIME,
             MSG_TYPE_CHARS,
             MSG_TYPE_CHARS.length,
             REQUIRED_TAG_MISSING.representation(),
@@ -218,10 +245,10 @@ public abstract class AbstractSessionTest
 
         assertThat(session().lastSentMsgSeqNum(), lessThanOrEqualTo(1));
 
-        session().sendSequenceReset(newSentSeqNo, newReceivedSeqNo);
+        session().trySendSequenceReset(newSentSeqNo, newReceivedSeqNo);
 
         final int nextSequenceIndex = SEQUENCE_INDEX + 1;
-        verify(sessionProxy).sequenceReset(anyInt(), eq(newSentSeqNo), eq(nextSequenceIndex), anyInt());
+        verify(sessionProxy).sendSequenceReset(anyInt(), eq(newSentSeqNo), eq(nextSequenceIndex), anyInt());
         assertEquals(newSentSeqNo - 1, session().lastSentMsgSeqNum());
         assertSequenceIndexIs(nextSequenceIndex);
     }
@@ -234,7 +261,7 @@ public abstract class AbstractSessionTest
 
         givenActive();
 
-        session().sendSequenceReset(newSentSeqNo, newReceivedSeqNo);
+        session().trySendSequenceReset(newSentSeqNo, newReceivedSeqNo);
 
         final String testReqId = "hello";
 
@@ -244,7 +271,7 @@ public abstract class AbstractSessionTest
             testReqId.length(),
             sendingTime(),
             MISSING_LONG,
-            false, false);
+            false, false, POSITION);
 
         verifyConnected();
         assertState(ACTIVE);
@@ -334,7 +361,7 @@ public abstract class AbstractSessionTest
 
     private void backPressureLogout()
     {
-        when(sessionProxy.logout(anyInt(), eq(SEQUENCE_INDEX), anyInt())).thenReturn(BACK_PRESSURED, POSITION);
+        when(sessionProxy.sendLogout(anyInt(), eq(SEQUENCE_INDEX), anyInt())).thenReturn(BACK_PRESSURED, POSITION);
 
         backPressureDisconnect();
     }
@@ -357,9 +384,10 @@ public abstract class AbstractSessionTest
 
         session().id(SESSION_ID);
 
-        session().onTestRequest(1, testReqId, testReqIdLength, sendingTime(), UNKNOWN, false, false);
+        session().onTestRequest(1, testReqId, testReqIdLength, sendingTime(), UNKNOWN, false, false, POSITION);
 
-        verify(sessionProxy).heartbeat(testReqId, testReqIdLength, 1, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendHeartbeat(
+            1, testReqId, testReqIdLength, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
     @Test
@@ -369,7 +397,7 @@ public abstract class AbstractSessionTest
 
         onSequenceReset();
 
-        verify(sessionProxy).resendRequest(1, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
     @Test
@@ -387,17 +415,17 @@ public abstract class AbstractSessionTest
         assertEquals(3, session().lastReceivedMsgSeqNum());
 
         verify(sessionProxy, times(2))
-            .resendRequest(71, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+            .sendResendRequest(71, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
     private Action onSequenceReset()
     {
-        return session().onSequenceReset(3, 4, true, false);
+        return session().onSequenceReset(3, 4, true, false, POSITION);
     }
 
     private void backPressureResendRequest()
     {
-        when(sessionProxy.resendRequest(anyInt(), anyInt(), anyInt(), eq(SEQUENCE_INDEX), anyInt()))
+        when(sessionProxy.sendResendRequest(anyInt(), anyInt(), anyInt(), eq(SEQUENCE_INDEX), anyInt()))
             .thenReturn(BACK_PRESSURED, POSITION);
     }
 
@@ -406,7 +434,7 @@ public abstract class AbstractSessionTest
     {
         session().lastReceivedMsgSeqNum(2);
 
-        session().onSequenceReset(1, 4, false, true);
+        session().onSequenceReset(1, 4, false, true, POSITION);
 
         verifyNoFurtherMessages();
     }
@@ -418,7 +446,7 @@ public abstract class AbstractSessionTest
 
         onGapFill(1, 4);
 
-        verify(sessionProxy).lowSequenceNumberLogout(anyInt(), eq(3), eq(1), eq(SEQUENCE_INDEX), anyInt());
+        verify(sessionProxy).sendLowSequenceNumberLogout(anyInt(), eq(3), eq(1), eq(SEQUENCE_INDEX), anyInt());
         verifyDisconnect(times(1));
     }
 
@@ -442,7 +470,7 @@ public abstract class AbstractSessionTest
     {
         givenActive();
 
-        session().onSequenceReset(0, 4, false, false);
+        session().onSequenceReset(0, 4, false, false, POSITION);
 
         assertEquals(4, session().expectedReceivedSeqNum());
         verifyNoFurtherMessages();
@@ -454,7 +482,7 @@ public abstract class AbstractSessionTest
     @Test
     public void shouldUpdateSequenceNumberOnSequenceReset()
     {
-        session().onSequenceReset(4, 4, false, false);
+        session().onSequenceReset(4, 4, false, false, POSITION);
 
         assertEquals(4, session().expectedReceivedSeqNum());
         verifyNoFurtherMessages();
@@ -466,7 +494,7 @@ public abstract class AbstractSessionTest
     {
         session().lastReceivedMsgSeqNum(3);
 
-        session().onSequenceReset(4, 4, false, false);
+        session().onSequenceReset(4, 4, false, false, POSITION);
 
         assertEquals(4, session().expectedReceivedSeqNum());
         verifyNoFurtherMessages();
@@ -478,10 +506,10 @@ public abstract class AbstractSessionTest
     {
         session().lastReceivedMsgSeqNum(3);
 
-        session().onSequenceReset(2, 1, false, false);
+        session().onSequenceReset(2, 1, false, false, POSITION);
 
         assertEquals(4, session().expectedReceivedSeqNum());
-        verify(sessionProxy).reject(
+        verify(sessionProxy).sendReject(
             1,
             2,
             NEW_SEQ_NO,
@@ -511,7 +539,7 @@ public abstract class AbstractSessionTest
 
         if (backPressured)
         {
-            when(sessionProxy.testRequest(7, TEST_REQ_ID, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED))
+            when(sessionProxy.sendTestRequest(7, TEST_REQ_ID, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED))
                 .thenReturn(BACK_PRESSURED, POSITION);
         }
 
@@ -523,7 +551,7 @@ public abstract class AbstractSessionTest
         }
 
         verify(sessionProxy, retry(backPressured))
-            .testRequest(7, TEST_REQ_ID, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+            .sendTestRequest(7, TEST_REQ_ID, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingHeartbeat();
     }
@@ -593,12 +621,12 @@ public abstract class AbstractSessionTest
         onMessage(3);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
 
         // Receives gapfill
-        session().onSequenceReset(1, 3, true, true);
+        session().onSequenceReset(1, 3, true, true, POSITION);
         assertState(ACTIVE);
         assertNotAwaitingResend();
     }
@@ -614,7 +642,7 @@ public abstract class AbstractSessionTest
         onMessage(3);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
     }
@@ -628,7 +656,7 @@ public abstract class AbstractSessionTest
         onMessage(3);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
 
@@ -646,7 +674,7 @@ public abstract class AbstractSessionTest
         onMessage(3);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
     }
@@ -661,7 +689,7 @@ public abstract class AbstractSessionTest
         onMessage(3);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
     }
@@ -677,7 +705,7 @@ public abstract class AbstractSessionTest
         onMessage(4);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
         reset(sessionProxy);
@@ -685,7 +713,7 @@ public abstract class AbstractSessionTest
         onPossDupMessage(1);
         onPossDupMessage(2);
 
-        verify(sessionProxy).resendRequest(2, 3, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(2, 3, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
 
@@ -706,7 +734,7 @@ public abstract class AbstractSessionTest
         onMessage(4);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
         reset(sessionProxy);
@@ -714,7 +742,7 @@ public abstract class AbstractSessionTest
         onPossDupMessage(1);
         onPossDupMessage(2);
 
-        verify(sessionProxy).resendRequest(2, 3, 3, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(2, 3, 3, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
 
@@ -734,14 +762,14 @@ public abstract class AbstractSessionTest
         onMessage(4);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
         reset(sessionProxy);
 
         onGapFill(1, 2);
 
-        verify(sessionProxy).resendRequest(2, 2, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(2, 2, 0, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
 
@@ -762,14 +790,14 @@ public abstract class AbstractSessionTest
         onMessage(4);
 
         // then sends a resend request
-        verify(sessionProxy).resendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(1, 1, 2, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
         reset(sessionProxy);
 
         onGapFill(1, 2);
 
-        verify(sessionProxy).resendRequest(2, 2, 3, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy).sendResendRequest(2, 2, 3, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         assertState(ACTIVE);
         assertAwaitingResend();
 
@@ -796,7 +824,7 @@ public abstract class AbstractSessionTest
     @Test
     public void shouldDisconnectIfBeginStringIsInvalidWhenBackPressured()
     {
-        when(sessionProxy.incorrectBeginStringLogout(1, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED))
+        when(sessionProxy.sendIncorrectBeginStringLogout(1, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED))
             .thenReturn(BACK_PRESSURED, POSITION);
         backPressureDisconnect();
 
@@ -816,7 +844,7 @@ public abstract class AbstractSessionTest
     {
         sequenceNumbersAreThreeAndActive();
 
-        session().resetSequenceNumbers();
+        session().tryResetSequenceNumbers();
 
         verifySetsSentSequenceNumbersToTwo(SEQUENCE_INDEX + 1);
     }
@@ -867,7 +895,7 @@ public abstract class AbstractSessionTest
 
         final String message = sendTestRequest(0);
 
-        assertThat(message, containsString(":00\001"));
+        assertThat(message, containsString(":00.000\001"));
     }
 
     @Test
@@ -882,7 +910,7 @@ public abstract class AbstractSessionTest
         final String secondMessage = sendTestRequest(remainderInMs);
 
         assertThat(firstMessage, containsString(":00.111\001"));
-        assertThat(secondMessage, containsString(":01\001"));
+        assertThat(secondMessage, containsString(":01.000\001"));
     }
 
     // See http://www.fixtradingcommunity.org/pg/discussions/topicpost/164720/fix-4x-sessionlevel-protocol-tests
@@ -900,7 +928,7 @@ public abstract class AbstractSessionTest
     @Test
     public void shouldDisconnectIfInvalidSendingTimeAtLogonWhenBackPressured()
     {
-        when(sessionProxy.rejectWhilstNotLoggedOn(anyInt(), any(), eq(SEQUENCE_INDEX), anyInt()))
+        when(sessionProxy.sendRejectWhilstNotLoggedOn(anyInt(), any(), eq(SEQUENCE_INDEX), anyInt()))
             .thenReturn(BACK_PRESSURED, POSITION);
 
         logonWithInvalidSendingTime(ABORT);
@@ -938,15 +966,70 @@ public abstract class AbstractSessionTest
         verifyDisconnect(times(1));
     }
 
+    @Test
+    public void shouldEncodeAsciiBufferHeaderExternally()
+    {
+        final char[] testReqId = "MyTestReqId".toCharArray();
+        final UtcTimestampEncoder timestampEncoder = new UtcTimestampEncoder();
+        final MutableAsciiBuffer asciiBuffer = new MutableAsciiBuffer(new byte[512]);
+        final ExampleMessageDecoder testDecoder = new ExampleMessageDecoder();
+        final ExampleMessageEncoder testEncoder = new ExampleMessageEncoder();
+        final Session session = session();
+
+        // set our encoder field
+        testEncoder.testReqID(testReqId);
+
+        // setup our session for the first encoding
+        long time = fakeClock.time();
+        session.lastSentMsgSeqNum(0);
+
+        // encode the header from the encoder
+        final int encodedSentSeqNum1 = session.prepare(testEncoder.header());
+        assertEquals(1, encodedSentSeqNum1); // expect to be 1 more than last sent seq num
+
+        // write our encoder to our buffer (header is not encoded from session)
+        final long result = testEncoder.encode(asciiBuffer, 0);
+        final int offset = Encoder.offset(result);
+        final int length = Encoder.length(result);
+
+        // decode the ascii buffer and make sure all the fields are correctly set
+        testDecoder.decode(asciiBuffer, offset, length);
+        assertArrayEquals(testReqId, testDecoder.testReqID());
+        assertEquals(1, testDecoder.header().msgSeqNum());
+        final String timeAsString1 = new String(timestampEncoder.buffer(), 0, timestampEncoder.encode(time));
+        assertEquals(timeAsString1, testDecoder.header().sendingTimeAsString());
+
+        // update the session internal state
+        session.lastSentMsgSeqNum(1); // increase last seen sent seq number
+        fakeClock.advanceSeconds(1);
+        time = fakeClock.time();
+
+        // encode the header of the encoder again with the new session state
+        final SessionHeaderEncoder headerEncoder = testEncoder.header();
+        final int encodedSentSeqNum2 = session.prepare(headerEncoder);
+        assertEquals(2, encodedSentSeqNum2);
+
+        // encode the header of the buffer with the new session state
+        headerEncoder.startMessage(asciiBuffer, 0);
+
+        // decode it to make sure all the fields are correctly set
+        testDecoder.decode(asciiBuffer, offset, length);
+        assertArrayEquals(testReqId, testDecoder.testReqID());
+        assertEquals(2, testDecoder.header().msgSeqNum());
+        final String timeAsString2 = new String(timestampEncoder.buffer(), 0, timestampEncoder.encode(time));
+        assertEquals(timeAsString2, testDecoder.header().sendingTimeAsString());
+        assertNotEquals(timeAsString1, timeAsString2); // make sure time has moved forward
+    }
+
     private void verifySendingTimeAccuracyLogout()
     {
-        verify(sessionProxy, times(1)).logout(3, SEQUENCE_INDEX,
+        verify(sessionProxy, times(1)).sendLogout(3, SEQUENCE_INDEX,
             SENDINGTIME_ACCURACY_PROBLEM.representation(), NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
     private void verifySendingTimeAccuracyProblem(final int times)
     {
-        verify(sessionProxy, times(times)).rejectWhilstNotLoggedOn(
+        verify(sessionProxy, times(times)).sendRejectWhilstNotLoggedOn(
             1, SENDINGTIME_ACCURACY_PROBLEM, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
@@ -958,7 +1041,8 @@ public abstract class AbstractSessionTest
             HEARTBEAT_INTERVAL,
             1,
             1,
-            UNKNOWN, null, null, false, false, false);
+            UNKNOWN, null, null, false, false, false,
+            POSITION);
 
         assertEquals(expectedAction, action);
     }
@@ -968,7 +1052,7 @@ public abstract class AbstractSessionTest
         testRequest.reset();
         testRequest.testReqID("testReqID");
         fakeClock.advanceMilliSeconds(nonSecondDurationInMs);
-        session().send(testRequest);
+        session().trySend(testRequest);
         return getSentMessage();
     }
 
@@ -986,8 +1070,8 @@ public abstract class AbstractSessionTest
 
     private void verifySetsSentSequenceNumbersToTwo(final int sequenceIndex)
     {
-        verify(sessionProxy).logon(
-            eq(HEARTBEAT_INTERVAL), eq(1), any(), any(), eq(true), eq(sequenceIndex), anyInt());
+        verify(sessionProxy).sendLogon(
+            eq(1), eq(HEARTBEAT_INTERVAL), any(), any(), eq(true), eq(sequenceIndex), anyInt());
         assertEquals(1, session().lastSentMsgSeqNum());
         verifyNoFurtherMessages();
     }
@@ -1005,7 +1089,7 @@ public abstract class AbstractSessionTest
 
     private void incorrectBeginStringLogout(final int times)
     {
-        verify(sessionProxy, times(times)).incorrectBeginStringLogout(
+        verify(sessionProxy, times(times)).sendIncorrectBeginStringLogout(
             1, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
@@ -1016,7 +1100,7 @@ public abstract class AbstractSessionTest
     {
         if (backPressured)
         {
-            when(sessionProxy.heartbeat(anyInt(), eq(SEQUENCE_INDEX), anyInt()))
+            when(sessionProxy.sendHeartbeat(anyInt(), eq(SEQUENCE_INDEX), anyInt()))
                 .thenReturn(BACK_PRESSURED, POSITION);
         }
 
@@ -1036,7 +1120,7 @@ public abstract class AbstractSessionTest
         }
 
         verify(sessionProxy, retry(backPressured))
-            .heartbeat(sentMsgSeqNo, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+            .sendHeartbeat(sentMsgSeqNo, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
         reset(sessionProxy);
     }
 
@@ -1047,13 +1131,13 @@ public abstract class AbstractSessionTest
 
     public void verifyDisconnect(final VerificationMode times)
     {
-        verify(sessionProxy, times).requestDisconnect(eq(CONNECTION_ID), any());
+        verify(sessionProxy, times).sendRequestDisconnect(eq(CONNECTION_ID), any());
         assertState(DISCONNECTED);
     }
 
     private void backPressureDisconnect()
     {
-        when(sessionProxy.requestDisconnect(eq(CONNECTION_ID), any())).thenReturn(BACK_PRESSURED, POSITION);
+        when(sessionProxy.sendRequestDisconnect(eq(CONNECTION_ID), any())).thenReturn(BACK_PRESSURED, POSITION);
     }
 
     protected void givenActive()
@@ -1063,7 +1147,7 @@ public abstract class AbstractSessionTest
 
     public void verifyLogout(final int msgSeqNo, final VerificationMode times)
     {
-        verify(sessionProxy, times).logout(msgSeqNo, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
+        verify(sessionProxy, times).sendLogout(msgSeqNo, SEQUENCE_INDEX, NO_LAST_MSG_SEQ_NUM_PROCESSED);
     }
 
     public void assertState(final SessionState state)
@@ -1089,7 +1173,8 @@ public abstract class AbstractSessionTest
             password,
             false,
             resetSeqNumFlag,
-            false);
+            false,
+            POSITION);
     }
 
     protected Action onMessage(final int msgSeqNo)
@@ -1105,7 +1190,7 @@ public abstract class AbstractSessionTest
     private Action onMessage(final int msgSeqNo, final boolean isPossDupOrResend, final long origSendingTime)
     {
         return session().onMessage(
-            msgSeqNo, MSG_TYPE_CHARS, sendingTime(), origSendingTime, isPossDupOrResend, isPossDupOrResend);
+            msgSeqNo, MSG_TYPE_CHARS, sendingTime(), origSendingTime, isPossDupOrResend, isPossDupOrResend, POSITION);
     }
 
     protected long sendingTime()
@@ -1115,12 +1200,12 @@ public abstract class AbstractSessionTest
 
     protected void onLogout()
     {
-        assertEquals(CONTINUE, session().onLogout(1, sendingTime(), UNKNOWN, false));
+        assertEquals(CONTINUE, session().onLogout(1, sendingTime(), UNKNOWN, false, POSITION));
     }
 
     protected void verifySendingTimeProblem()
     {
-        verify(sessionProxy).reject(
+        verify(sessionProxy).sendReject(
             2,
             2,
             52,
@@ -1133,7 +1218,7 @@ public abstract class AbstractSessionTest
 
     protected void messageWithWeirdTime(final long sendingTime)
     {
-        session().onMessage(2, MSG_TYPE_CHARS, sendingTime, UNKNOWN, false, false);
+        session().onMessage(2, MSG_TYPE_CHARS, sendingTime, UNKNOWN, false, false, POSITION);
     }
 
     protected void onBeginString(final boolean isLogon)
@@ -1150,7 +1235,7 @@ public abstract class AbstractSessionTest
 
     protected void verifyConnected()
     {
-        verify(sessionProxy, never()).requestDisconnect(CONNECTION_ID, APPLICATION_DISCONNECT);
+        verify(sessionProxy, never()).sendRequestDisconnect(CONNECTION_ID, APPLICATION_DISCONNECT);
     }
 
     protected void verifyCanRoundtripTestMessage()
@@ -1158,8 +1243,9 @@ public abstract class AbstractSessionTest
         final char[] testReqId = "Hello".toCharArray();
         final int testReqIdLength = 5;
 
-        session().onTestRequest(4, testReqId, testReqIdLength, sendingTime(), UNKNOWN, false, false);
-        verify(sessionProxy).heartbeat(eq(testReqId), eq(testReqIdLength), anyInt(), eq(SEQUENCE_INDEX), anyInt());
+        session().onTestRequest(
+            4, testReqId, testReqIdLength, sendingTime(), UNKNOWN, false, false, POSITION);
+        verify(sessionProxy).sendHeartbeat(anyInt(), eq(testReqId), eq(testReqIdLength), eq(SEQUENCE_INDEX), anyInt());
         verifyConnected();
     }
 
@@ -1209,7 +1295,7 @@ public abstract class AbstractSessionTest
 
     private void onGapFill(final int msgSeqNo, final int newSeqNo)
     {
-        session().onSequenceReset(msgSeqNo, newSeqNo, true, false);
+        session().onSequenceReset(msgSeqNo, newSeqNo, true, false, POSITION);
     }
 
     private void verifyNotifiesLoginListener(final VerificationMode verificationMode)

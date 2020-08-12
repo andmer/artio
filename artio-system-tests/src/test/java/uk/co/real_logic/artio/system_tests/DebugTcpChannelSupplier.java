@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,8 +16,8 @@
 package uk.co.real_logic.artio.system_tests;
 
 import uk.co.real_logic.artio.engine.EngineConfiguration;
+import uk.co.real_logic.artio.engine.framer.DefaultTcpChannelSupplier;
 import uk.co.real_logic.artio.engine.framer.TcpChannel;
-import uk.co.real_logic.artio.engine.framer.TcpChannelSupplier;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -26,11 +26,8 @@ import java.util.ArrayList;
 
 /**
  * Hook for testing interaction with different networking conditions.
- *
- * NB: this class is not thread-safe and take care to ensure that your tests don't use it
- * concurrently with new connections being established.
  */
-public class DebugTcpChannelSupplier extends TcpChannelSupplier
+public class DebugTcpChannelSupplier extends DefaultTcpChannelSupplier
 {
     private final ArrayList<TcpChannel> channels = new ArrayList<>();
     private boolean isEnabled = true;
@@ -40,21 +37,21 @@ public class DebugTcpChannelSupplier extends TcpChannelSupplier
         super(configuration);
     }
 
-    protected TcpChannel newTcpChannel(final SocketChannel channel) throws IOException
+    protected synchronized TcpChannel newTcpChannel(final SocketChannel channel) throws IOException
     {
         final TcpChannel tcpChannel = new TcpChannel(channel);
         channels.add(tcpChannel);
         return tcpChannel;
     }
 
-    public void disable()
+    public synchronized void disable()
     {
         isEnabled = false;
         channels.forEach(TcpChannel::close);
         channels.clear();
     }
 
-    public void enable()
+    public synchronized void enable()
     {
         isEnabled = true;
 
@@ -65,7 +62,7 @@ public class DebugTcpChannelSupplier extends TcpChannelSupplier
         }
     }
 
-    public int pollSelector(final long timeInMs, final NewChannelHandler handler) throws IOException
+    public synchronized int pollSelector(final long timeInMs, final NewChannelHandler handler) throws IOException
     {
         if (isEnabled)
         {
@@ -77,7 +74,10 @@ public class DebugTcpChannelSupplier extends TcpChannelSupplier
         }
     }
 
-    public void open(final InetSocketAddress address, final InitiatedChannelHandler handler) throws IOException
+    public synchronized void open(
+        final InetSocketAddress address,
+        final InitiatedChannelHandler handler)
+        throws IOException
     {
         if (isEnabled)
         {
@@ -85,7 +85,7 @@ public class DebugTcpChannelSupplier extends TcpChannelSupplier
         }
         else
         {
-            handler.onInitiatedChannel(null, new IOException("Unable to connect"));
+            // Deliberately blank - black hole the connection
         }
     }
 }

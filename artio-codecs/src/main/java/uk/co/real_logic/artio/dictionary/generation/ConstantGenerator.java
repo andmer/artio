@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -30,10 +30,10 @@ import static uk.co.real_logic.artio.dictionary.generation.GenerationUtil.import
 
 public class ConstantGenerator
 {
-    public static final String CLASS_NAME = "Constants";
+    static final String CLASS_NAME = "Constants";
 
-    public static final String BODY = "public class " + CLASS_NAME + "\n" + "{\n\n";
-    public static final String VERSION = "VERSION";
+    private static final String BODY = "public class " + CLASS_NAME + "\n" + "{\n\n";
+    static final String VERSION = "VERSION";
 
     private final Dictionary dictionary;
     private final String builderPackage;
@@ -72,7 +72,7 @@ public class ConstantGenerator
     {
         final String addFields = fields
             .stream()
-            .map((field) -> addField(field, name))
+            .map((field) -> addField(field, name, "        "))
             .collect(joining());
 
         final int hashMapSize = sizeHashSet(fields);
@@ -109,10 +109,11 @@ public class ConstantGenerator
             .stream()
             .map((message) ->
             {
-                final int type = message.packedType();
+                final long type = message.packedType();
                 final String constantName = GenerationUtil.constantName(message.name()) + "_MESSAGE";
                 final String stringConstantName = constantName + "_AS_STR";
-                return generateMessageTypeConstant(stringConstantName, type) + generateIntConstant(constantName, type);
+                return generateMessageTypeConstant(stringConstantName, message.fullType()) +
+                       generateLongConstant(constantName, type);
             })
             .collect(joining());
     }
@@ -132,22 +133,13 @@ public class ConstantGenerator
             .values();
     }
 
-    private String generateMessageTypeConstant(final String stringConstantName, final int messageType)
-    {
-        final char[] chars;
-        if (messageType > Byte.MAX_VALUE)
-        {
-            chars = new char[]{ (char)(byte)messageType, (char)(byte)(messageType >>> 8) };
-        }
-        else
-        {
-            chars = new char[]{ (char)(byte)messageType };
-        }
 
+    private String generateMessageTypeConstant(final String stringConstantName, final String messageType)
+    {
         return String.format(
-            "    public static final String %1$s = \"%2$s\";\n",
-            stringConstantName,
-            new String(chars));
+                "    public static final String %1$s = \"%2$s\";\n",
+                stringConstantName,
+                messageType);
     }
 
     private String generateIntConstant(final String name, final int number)
@@ -156,5 +148,13 @@ public class ConstantGenerator
             "    public static final int %1$s = %2$d;\n\n",
             name,
             number);
+    }
+
+    private String generateLongConstant(final String name, final long number)
+    {
+        return String.format(
+                "    public static final long %1$s = %2$dL;\n\n",
+                name,
+                number);
     }
 }

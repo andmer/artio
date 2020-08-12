@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,18 +17,18 @@ package uk.co.real_logic.artio.dictionary;
 
 import uk.co.real_logic.artio.dictionary.generation.CodecUtil;
 
-final class CharArrayWrapper
+public final class CharArrayWrapper
 {
     private char[] values;
     private int length;
     private int offset;
     private int hashcode;
 
-    CharArrayWrapper()
+    public CharArrayWrapper()
     {
     }
 
-    CharArrayWrapper(final CharArrayWrapper other)
+    public CharArrayWrapper(final CharArrayWrapper other)
     {
         this.values = other.values;
         this.offset = other.offset;
@@ -36,18 +36,18 @@ final class CharArrayWrapper
         this.hashcode = other.hashcode;
     }
 
-    CharArrayWrapper(final String string)
+    public CharArrayWrapper(final String string)
     {
         final char[] values = string.toCharArray();
         wrap(values, values.length);
     }
 
-    void wrap(final char[] value, final int length)
+    public void wrap(final char[] value, final int length)
     {
         wrap(value, 0, length);
     }
 
-    void wrap(final char[] value, final int offset, final int length)
+    public void wrap(final char[] value, final int offset, final int length)
     {
         this.values = value;
         this.offset = offset;

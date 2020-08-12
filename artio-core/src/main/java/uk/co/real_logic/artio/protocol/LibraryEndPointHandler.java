@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,6 +16,8 @@
 package uk.co.real_logic.artio.protocol;
 
 import io.aeron.logbuffer.ControlledFragmentHandler.Action;
+import org.agrona.DirectBuffer;
+import uk.co.real_logic.artio.dictionary.FixDictionary;
 import uk.co.real_logic.artio.messages.*;
 import uk.co.real_logic.artio.messages.ControlNotificationDecoder.SessionsDecoder;
 
@@ -29,11 +31,8 @@ public interface LibraryEndPointHandler
 
     Action onRequestSessionReply(int toId, long replyToId, SessionReplyStatus status);
 
-    Action onNewSentPosition(int libraryId, long position);
-
-    Action onNotLeader(int libraryId, long replyToId, String libraryChannel);
-
-    Action onControlNotification(int libraryId, SessionsDecoder sessions);
+    Action onControlNotification(
+        int libraryId, InitialAcceptedSessionOwner initialAcceptedSessionOwner, SessionsDecoder sessions);
 
     Action onSlowStatusNotification(int libraryId, long connectionId, boolean hasBecomeSlow);
 
@@ -45,12 +44,10 @@ public interface LibraryEndPointHandler
         long session,
         int lastSentSeqNum,
         int lastRecvSeqNum,
-        long logonTime,
         SessionStatus sessionStatus,
         SlowStatus slowStatus,
         ConnectionType connectionType,
         SessionState sessionState,
-        boolean awaitingResend,
         int heartBeatInt,
         boolean closedResendInterval,
         int resendRequestChunkSize,
@@ -58,6 +55,15 @@ public interface LibraryEndPointHandler
         boolean enableLastMsgSeqNumProcessed,
         long correlationId,
         int sequenceIndex,
+        boolean awaitingResend,
+        int lastResentMsgSeqNo,
+        int lastResendChunkMsgSeqNum,
+        int endOfResendRequestRange,
+        boolean awaitingHeartbeat,
+        int logonReceivedSequenceNumber,
+        int logonSequenceIndex,
+        long lastLogonTime,
+        long lastSequenceResetTime,
         String localCompId,
         String localSubId,
         String localLocationId,
@@ -66,5 +72,42 @@ public interface LibraryEndPointHandler
         String remoteLocationId,
         String address,
         String username,
-        String password);
+        String password,
+        Class<? extends FixDictionary> fixDictionary,
+        MetaDataStatus metaDataStatus,
+        DirectBuffer metaDataBuffer,
+        int metaDataOffset,
+        int metaDataLength);
+
+    Action onFollowerSessionReply(int libraryId, long replyToId, long session);
+
+    Action onEngineClose(int libraryId);
+
+    Action onWriteMetaDataReply(int libraryId, long replyToId, MetaDataStatus status);
+
+    Action onReadMetaDataReply(
+        int libraryId,
+        long replyToId,
+        MetaDataStatus status,
+        DirectBuffer srcBuffer,
+        int srcOffset,
+        int srcLength);
+
+    Action onReplayMessagesReply(int libraryId, long replyToId, ReplayMessagesStatus status);
+
+    Action onILinkConnect(
+        int libraryId,
+        long correlationId,
+        long connection,
+        long uuid,
+        long lastReceivedSequenceNumber,
+        long lastSentSequenceNumber,
+        boolean newlyAllocated,
+        long lastUuid);
+
+    Action onLibraryExtendPosition(
+        int libraryId, long correlationId, int newSessionId, long stopPosition, int initialTermId,
+        int termBufferLength, int mtuLength);
+
+    Action onReplayComplete(int libraryId, long connection);
 }

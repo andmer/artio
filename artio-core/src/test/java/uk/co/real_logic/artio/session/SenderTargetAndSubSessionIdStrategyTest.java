@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -23,10 +23,10 @@ import uk.co.real_logic.artio.decoder.HeaderDecoder;
 import java.util.Set;
 
 import static java.util.stream.Collectors.toSet;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertThat;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 import static uk.co.real_logic.artio.session.SenderAndTargetSessionIdStrategyTest.IDS;
@@ -35,7 +35,7 @@ import static uk.co.real_logic.artio.session.SessionIdStrategy.INSUFFICIENT_SPAC
 @SuppressWarnings("Indentation")
 public class SenderTargetAndSubSessionIdStrategyTest
 {
-    private SenderTargetAndSubSessionIdStrategy strategy = new SenderTargetAndSubSessionIdStrategy();
+    private final SenderTargetAndSubSessionIdStrategy strategy = new SenderTargetAndSubSessionIdStrategy();
 
     @Test
     public void differentIdsDoNotClash()
@@ -84,8 +84,8 @@ public class SenderTargetAndSubSessionIdStrategyTest
                     when(headerDecoder.senderCompIDLength()).thenReturn(acceptorSenderComp.length());
                     when(headerDecoder.targetCompID()).thenReturn(acceptorTargetComp.toCharArray());
                     when(headerDecoder.targetCompIDLength()).thenReturn(acceptorTargetComp.length());
-                    when(headerDecoder.targetSubID()).thenReturn(acceptorTargetSub.toCharArray());
-                    when(headerDecoder.targetSubIDLength()).thenReturn(acceptorTargetSub.length());
+                    when(headerDecoder.senderSubID()).thenReturn(acceptorTargetSub.toCharArray());
+                    when(headerDecoder.senderSubIDLength()).thenReturn(acceptorTargetSub.length());
 
                     final Object second = strategy.onAcceptLogon(headerDecoder);
                     assertEquals(first, second);

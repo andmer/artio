@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2018 Real Logic Ltd, Adaptive Financial Consulting Ltd.
+ * Copyright 2015-2020 Real Logic Limited, Adaptive Financial Consulting Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,11 +15,10 @@
  */
 package uk.co.real_logic.artio.dictionary;
 
-import org.agrona.LangUtil;
 import org.agrona.Verify;
 import org.w3c.dom.*;
-import uk.co.real_logic.artio.dictionary.ir.*;
 import uk.co.real_logic.artio.dictionary.ir.Dictionary;
+import uk.co.real_logic.artio.dictionary.ir.*;
 import uk.co.real_logic.artio.dictionary.ir.Field.Type;
 import uk.co.real_logic.artio.dictionary.ir.Field.Value;
 
@@ -30,11 +29,11 @@ import javax.xml.xpath.XPath;
 import javax.xml.xpath.XPathExpression;
 import javax.xml.xpath.XPathExpressionException;
 import javax.xml.xpath.XPathFactory;
-import java.io.IOException;
 import java.io.InputStream;
 import java.util.*;
 import java.util.function.Consumer;
 
+import static java.util.stream.Collectors.toMap;
 import static javax.xml.xpath.XPathConstants.NODESET;
 import static uk.co.real_logic.artio.dictionary.ir.Field.Type.*;
 
@@ -57,8 +56,11 @@ public final class DictionaryParser
     private final XPathExpression findHeader;
     private final XPathExpression findTrailer;
 
-    public DictionaryParser()
+    private final boolean allowDuplicates;
+
+    public DictionaryParser(final boolean allowDuplicates)
     {
+        this.allowDuplicates = allowDuplicates;
         try
         {
             documentBuilder = DocumentBuilderFactory.newInstance().newDocumentBuilder();
@@ -86,6 +88,8 @@ public final class DictionaryParser
 
         reconnectForwardReferences(forwardReferences, components);
         sanitizeDictionary(fields, messages);
+        validateDataFields(messages);
+        validateDataFields(components.values());
 
         if (fixtDictionary != null)
         {
@@ -111,9 +115,65 @@ public final class DictionaryParser
             final Component trailer = extractComponent(
                 document, fields, findTrailer, "Trailer", components, forwardReferences);
 
+            validateDataFieldsInAggregate(header);
+            validateDataFieldsInAggregate(trailer);
+
             final String specType = getValueOrDefault(fixAttributes, "type", "FIX");
             return new Dictionary(messages, fields, components, header, trailer, specType, majorVersion, minorVersion);
         }
+    }
+
+    private void validateDataFields(final Collection<? extends Aggregate> aggregates)
+    {
+        aggregates.forEach(this::validateDataFieldsInAggregate);
+    }
+
+    private void validateDataFieldsInAggregate(final Aggregate aggregate)
+    {
+        final Map<String, Field> nameToField = aggregate
+            .fieldEntries()
+            .map(entry -> (Field)entry.element())
+            .collect(toMap(Field::name, f -> f));
+
+        for (final Entry entry : aggregate.entries())
+        {
+            entry.forEach(
+                field ->
+                {
+                    if (field.type().isDataBased())
+                    {
+                        final String name = field.name();
+                        if (!(hasLengthField(field, "Length", nameToField) ||
+                            hasLengthField(field, "Len", nameToField)))
+                        {
+                            throw new IllegalStateException(
+                                String.format("Each DATA field must have a corresponding LENGTH field using the " +
+                                "suffix 'Len' or 'Length'. %1$s is missing a length field in %2$s",
+                                name,
+                                aggregate.name()));
+                        }
+                    }
+                },
+                this::validateDataFieldsInAggregate,
+                this::validateDataFieldsInAggregate);
+        }
+    }
+
+    private boolean hasLengthField(final Field field, final String suffix, final Map<String, Field> nameToField)
+    {
+        final String fieldName = field.name() + suffix;
+        final Field associatedLengthField = nameToField.get(fieldName);
+        if (associatedLengthField != null)
+        {
+            final Type type = associatedLengthField.type();
+            if (type == LENGTH || type == INT)
+            {
+                field.associatedLengthField(associatedLengthField);
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void correctMultiCharacterCharEnums(final Map<String, Field> fields)
@@ -179,7 +239,19 @@ public final class DictionaryParser
                 final Field field = new Field(number, normalisedFieldName, type);
 
                 extractEnumValues(field.values(), node.getChildNodes());
-                fields.put(name, field);
+                final Field oldField = fields.put(name, field);
+                if (oldField != null)
+                {
+                    throw new IllegalStateException(String.format(
+                        "Cannot have the same field name defined twice; this is against the FIX spec." +
+                        "Details to follow:\n" +
+                        "Field : %1$s (%2$s)\n" +
+                        "Field : %3$s (%4$s)",
+                        field.name(),
+                        field.number(),
+                        oldField.name(),
+                        oldField.number()));
+                }
             });
 
         return fields;
@@ -386,7 +458,13 @@ public final class DictionaryParser
 
         if (errorMessage.length() > 0)
         {
-            throw new IllegalStateException(errorMessage.toString());
+            if (!allowDuplicates)
+            {
+                throw new IllegalStateException(String.format(
+                        "%sUse -D%s=true to allow duplicated fields (Dangerous. May break parser).",
+                        errorMessage,
+                        CodecGenerationTool.FIX_CODECS_ALLOW_DUPLICATE_FIELDS));
+            }
         }
     }
 
@@ -397,40 +475,33 @@ public final class DictionaryParser
         final Deque<String> path,
         final StringBuilder errorCollector)
     {
-        try
+        for (final Entry e : aggregate.entries())
         {
-            for (final Entry e : aggregate.entries())
-            {
-                e.forEach(
-                    (field) -> addField(messageName, field, allFields, path, errorCollector),
-                    (group) ->
-                    {
-                        path.push(group.name());
-                        identifyDuplicateFieldDefinitionsForMessage(
-                            messageName,
-                            group,
-                            allFields,
-                            path,
-                            errorCollector);
-                        path.pop();
-                    },
-                    (component) ->
-                    {
-                        path.push(component.name());
-                        identifyDuplicateFieldDefinitionsForMessage(
-                            messageName,
-                            component,
-                            allFields,
-                            path,
-                            errorCollector);
-                        path.pop();
-                    }
-                );
-            }
-        }
-        catch (final IOException e)
-        {
-            LangUtil.rethrowUnchecked(e);
+            e.forEach(
+                (field) -> addField(messageName, field, allFields, path, errorCollector),
+                (group) ->
+                {
+                    path.push(group.name());
+                    identifyDuplicateFieldDefinitionsForMessage(
+                        messageName,
+                        group,
+                        allFields,
+                        path,
+                        errorCollector);
+                    path.pop();
+                },
+                (component) ->
+                {
+                    path.push(component.name());
+                    identifyDuplicateFieldDefinitionsForMessage(
+                        messageName,
+                        component,
+                        allFields,
+                        path,
+                        errorCollector);
+                    path.pop();
+                }
+            );
         }
     }
 

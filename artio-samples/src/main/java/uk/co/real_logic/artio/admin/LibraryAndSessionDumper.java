@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,7 @@ package uk.co.real_logic.artio.admin;
 import org.agrona.concurrent.IdleStrategy;
 import uk.co.real_logic.artio.Reply;
 import uk.co.real_logic.artio.engine.FixEngine;
-import uk.co.real_logic.artio.engine.SessionInfo;
+import uk.co.real_logic.artio.engine.ConnectedSessionInfo;
 import uk.co.real_logic.artio.engine.framer.LibraryInfo;
 
 import java.util.List;
@@ -54,7 +54,7 @@ public class LibraryAndSessionDumper
             System.out.printf("Library %d%n", library.libraryId());
             System.out.println("--------------------------------%n");
             System.out.println("| Id   | Remote Address %n");
-            for (final SessionInfo session : library.sessions())
+            for (final ConnectedSessionInfo session : library.sessions())
             {
                 System.out.printf("| %4d | %s", session.connectionId(), session.address());
             }

@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -88,9 +88,11 @@ public class PrinterGenerator
     private String generateToString()
     {
         final Function<Message, String> mapper = (aggregate) -> String.format(
-            "            case %s:\n" +
-            "            %s.decode(input, offset, length);\n" +
-            "            return %2$s.toString();\n\n",
+            "            if (messageType == %sL)\n" +
+            "            {\n" +
+            "                %s.decode(input, offset, length);\n" +
+            "                return %2$s.toString();\n" +
+            "            }\n\n",
             aggregate.packedType(),
             decoderFieldName(aggregate));
 
@@ -101,14 +103,13 @@ public class PrinterGenerator
             "        final AsciiBuffer input,\n" +
             "        final int offset,\n" +
             "        final int length,\n" +
-            "        final int messageType)\n" +
+            "        final long messageType)\n" +
             "    {\n" +
-            "        switch(messageType)\n" +
-            "        {\n" +
             cases +
-            "            default:\n" +
-            "            throw new IllegalArgumentException(\"Unknown Message Type: \" + messageType);" +
-            "        }\n" +
+            "            else\n" +
+            "            {\n" +
+            "                throw new IllegalArgumentException(\"Unknown Message Type: \" + messageType);\n" +
+            "            }\n" +
             "    }\n\n";
     }
 

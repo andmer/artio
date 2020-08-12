@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,15 +17,15 @@ package uk.co.real_logic.artio.session;
 
 import org.agrona.DirectBuffer;
 import org.agrona.MutableDirectBuffer;
-import uk.co.real_logic.artio.builder.HeaderEncoder;
-import uk.co.real_logic.artio.decoder.HeaderDecoder;
+import uk.co.real_logic.artio.builder.SessionHeaderEncoder;
+import uk.co.real_logic.artio.decoder.SessionHeaderDecoder;
 import uk.co.real_logic.artio.dictionary.generation.CodecUtil;
 import uk.co.real_logic.artio.storage.messages.SenderTargetAndSubCompositeKeyDecoder;
 import uk.co.real_logic.artio.storage.messages.SenderTargetAndSubCompositeKeyEncoder;
 
 import java.util.Arrays;
 
-import static java.nio.charset.StandardCharsets.US_ASCII;
+import static uk.co.real_logic.artio.dictionary.SessionConstants.*;
 
 /**
  * A simple, and dumb session id Strategy based upon hashing SenderCompID and TargetCompID. Makes no assumptions
@@ -44,11 +44,11 @@ class SenderTargetAndSubSessionIdStrategy implements SessionIdStrategy
     {
     }
 
-    public CompositeKey onAcceptLogon(final HeaderDecoder header)
+    public CompositeKey onAcceptLogon(final SessionHeaderDecoder header)
     {
         return new CompositeKeyImpl(
             header.targetCompID(), header.targetCompIDLength(),
-            header.targetSubID(), header.targetSubIDLength(),
+            header.senderSubID(), header.senderSubIDLength(),
             header.senderCompID(), header.senderCompIDLength());
     }
 
@@ -72,23 +72,22 @@ class SenderTargetAndSubSessionIdStrategy implements SessionIdStrategy
             targetCompIdChars.length);
     }
 
-    public void setupSession(final CompositeKey compositeKey, final HeaderEncoder headerEncoder)
+    public void setupSession(final CompositeKey compositeKey, final SessionHeaderEncoder headerEncoder)
     {
         final CompositeKeyImpl composite = (CompositeKeyImpl)compositeKey;
-        headerEncoder.senderCompID(composite.localCompId);
+        headerEncoder.senderCompID(composite.localCompID);
         headerEncoder.senderSubID(composite.localSubID);
         headerEncoder.targetCompID(composite.remoteCompID);
     }
 
     public int save(final CompositeKey compositeKey, final MutableDirectBuffer buffer, final int offset)
     {
-        final CompositeKeyImpl key = (CompositeKeyImpl)compositeKey;
-        final byte[] localCompID = key.localCompId;
-        final byte[] localSubID = key.localSubID;
-        final byte[] remoteCompID = key.remoteCompID;
+        final String localCompID = compositeKey.localCompId();
+        final String localSubID = compositeKey.localSubId();
+        final String remoteCompID = compositeKey.remoteCompId();
 
         final int length =
-            localCompID.length + localSubID.length + remoteCompID.length + BLOCK_AND_LENGTH_FIELDS_LENGTH;
+            localCompID.length() + localSubID.length() + remoteCompID.length() + BLOCK_AND_LENGTH_FIELDS_LENGTH;
 
         if (buffer.capacity() < offset + length)
         {
@@ -96,9 +95,9 @@ class SenderTargetAndSubSessionIdStrategy implements SessionIdStrategy
         }
 
         keyEncoder.wrap(buffer, offset);
-        keyEncoder.putLocalCompId(localCompID, 0, localCompID.length);
-        keyEncoder.putLocalSubId(localSubID, 0, localSubID.length);
-        keyEncoder.putRemoteCompId(remoteCompID, 0, remoteCompID.length);
+        keyEncoder.localCompId(localCompID);
+        keyEncoder.localSubId(localSubID);
+        keyEncoder.remoteCompId(remoteCompID);
 
         return length;
     }
@@ -122,39 +121,62 @@ class SenderTargetAndSubSessionIdStrategy implements SessionIdStrategy
         return new CompositeKeyImpl(localCompId, localSubId, remoteCompId);
     }
 
+    public int validateCompIds(final CompositeKey compositeKey, final SessionHeaderDecoder header)
+    {
+        final CompositeKeyImpl key = (CompositeKeyImpl)compositeKey;
+
+        if (!CodecUtil.equals(key.remoteCompID, header.senderCompID(), header.senderCompIDLength()))
+        {
+            return SENDER_COMP_ID;
+        }
+
+        if (!CodecUtil.equals(key.localCompID, header.targetCompID(), header.targetCompIDLength()))
+        {
+            return TARGET_COMP_ID;
+        }
+
+        final boolean hasSenderSubID = header.hasSenderSubID();
+        if (!(hasSenderSubID && CodecUtil.equals(key.localSubID, header.senderSubID(), header.senderSubIDLength())))
+        {
+            return SENDER_SUB_ID;
+        }
+
+        return 0;
+    }
+
     private static final class CompositeKeyImpl implements CompositeKey
     {
-        private final byte[] localCompId;
-        private final byte[] localSubID;
-        private final byte[] remoteCompID;
+        private final char[] localCompID;
+        private final char[] localSubID;
+        private final char[] remoteCompID;
         private final int hashCode;
 
         private CompositeKeyImpl(
-            final char[] localCompId,
+            final char[] localCompID,
             final int localCompIDLength,
             final char[] localSubID,
             final int localSubIDLength,
             final char[] remoteCompID,
             final int remoteCompIDLength)
         {
-            this(
-                CodecUtil.toBytes(localCompId, localCompIDLength),
-                CodecUtil.toBytes(localSubID, localSubIDLength),
-                CodecUtil.toBytes(remoteCompID, remoteCompIDLength));
+            this.localCompID = Arrays.copyOf(localCompID, localCompIDLength);
+            this.remoteCompID = Arrays.copyOf(remoteCompID, remoteCompIDLength);
+            this.localSubID = Arrays.copyOf(localSubID, localSubIDLength);
+            hashCode = hash(this.localCompID, this.localSubID, this.remoteCompID);
         }
 
         private CompositeKeyImpl(
-            final byte[] localCompId,
+            final byte[] localCompID,
             final byte[] localSubID,
             final byte[] remoteCompID)
         {
-            this.localCompId = localCompId;
-            this.localSubID = localSubID;
-            this.remoteCompID = remoteCompID;
-            hashCode = hash(this.localCompId, this.localSubID, this.remoteCompID);
+            this.localCompID = CodecUtil.fromBytes(localCompID);
+            this.localSubID = CodecUtil.fromBytes(localSubID);
+            this.remoteCompID = CodecUtil.fromBytes(remoteCompID);
+            hashCode = hash(this.localCompID, this.localSubID, this.remoteCompID);
         }
 
-        private int hash(final byte[] localCompID, final byte[] localSubID, final byte[] remoteCompID)
+        private int hash(final char[] localCompID, final char[] localSubID, final char[] remoteCompID)
         {
             int result = Arrays.hashCode(localCompID);
             result = 31 * result + Arrays.hashCode(localSubID);
@@ -172,7 +194,7 @@ class SenderTargetAndSubSessionIdStrategy implements SessionIdStrategy
             if (obj instanceof CompositeKeyImpl)
             {
                 final CompositeKeyImpl compositeKey = (CompositeKeyImpl)obj;
-                return Arrays.equals(compositeKey.localCompId, localCompId) &&
+                return Arrays.equals(compositeKey.localCompID, localCompID) &&
                     Arrays.equals(compositeKey.localSubID, localSubID) &&
                     Arrays.equals(compositeKey.remoteCompID, remoteCompID);
             }
@@ -191,12 +213,12 @@ class SenderTargetAndSubSessionIdStrategy implements SessionIdStrategy
 
         public String localCompId()
         {
-            return new String(localCompId, US_ASCII);
+            return new String(localCompID);
         }
 
         public String localSubId()
         {
-            return new String(localSubID, US_ASCII);
+            return new String(localSubID);
         }
 
         public String localLocationId()
@@ -206,7 +228,7 @@ class SenderTargetAndSubSessionIdStrategy implements SessionIdStrategy
 
         public String remoteCompId()
         {
-            return new String(remoteCompID, US_ASCII);
+            return new String(remoteCompID);
         }
 
         public String remoteSubId()

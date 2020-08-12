@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited., Monotonic Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,6 +22,7 @@ import org.mockito.ArgumentCaptor;
 import uk.co.real_logic.artio.builder.Encoder;
 import uk.co.real_logic.artio.decoder.ResendRequestDecoder;
 import uk.co.real_logic.artio.decoder.SequenceResetDecoder;
+import uk.co.real_logic.artio.engine.ReplayerCommandQueue;
 import uk.co.real_logic.artio.engine.SenderSequenceNumbers;
 import uk.co.real_logic.artio.protocol.GatewayPublication;
 import uk.co.real_logic.artio.util.AsciiBuffer;
@@ -37,10 +38,12 @@ import static uk.co.real_logic.artio.messages.MessageStatus.OK;
 
 public class GapFillerTest extends AbstractLogTest
 {
-    private GatewayPublication publication = mock(GatewayPublication.class);
-    private Subscription subscription = mock(Subscription.class);
-    private SenderSequenceNumbers senderSequenceNumbers = mock(SenderSequenceNumbers.class);
-    private GapFiller gapFiller = new GapFiller(subscription, publication, DEFAULT_NAME_PREFIX, senderSequenceNumbers);
+    private final GatewayPublication publication = mock(GatewayPublication.class);
+    private final Subscription subscription = mock(Subscription.class);
+    private final SenderSequenceNumbers senderSequenceNumbers = mock(SenderSequenceNumbers.class);
+    private final GapFiller gapFiller = new GapFiller(
+        subscription, publication, DEFAULT_NAME_PREFIX, senderSequenceNumbers,
+        mock(ReplayerCommandQueue.class), new FakeFixSessionCodecsFactory());
 
     @Test
     public void shouldGapFillInResponseToResendRequest()
@@ -51,7 +54,7 @@ public class GapFillerTest extends AbstractLogTest
         gapFiller.onMessage(
             buffer, encodedOffset, encodedLength,
             LIBRARY_ID, CONNECTION_ID, SESSION_ID, SEQUENCE_INDEX,
-            ResendRequestDecoder.MESSAGE_TYPE, 0L, OK, 0, 0L);
+            ResendRequestDecoder.MESSAGE_TYPE, 0L, OK, 0, 0L, 0);
 
         final ArgumentCaptor<DirectBuffer> bufferCaptor = ArgumentCaptor.forClass(DirectBuffer.class);
         final ArgumentCaptor<Integer> lengthCaptor = ArgumentCaptor.forClass(int.class);

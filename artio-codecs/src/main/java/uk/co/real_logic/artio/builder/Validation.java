@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,7 +17,7 @@ package uk.co.real_logic.artio.builder;
 
 public final class Validation
 {
-    public static final String CODEC_VALIDATION_DISABLED_PROP = "fix.codecs.no_validation";
+    private static final String CODEC_VALIDATION_DISABLED_PROP = "fix.codecs.no_validation";
     public static final boolean CODEC_VALIDATION_DISABLED = Boolean.getBoolean(CODEC_VALIDATION_DISABLED_PROP);
     public static final boolean CODEC_VALIDATION_ENABLED = !CODEC_VALIDATION_DISABLED;
 

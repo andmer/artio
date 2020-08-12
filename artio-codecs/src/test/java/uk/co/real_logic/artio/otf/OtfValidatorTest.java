@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -16,23 +16,23 @@
 package uk.co.real_logic.artio.otf;
 
 import org.junit.Test;
-import uk.co.real_logic.artio.dictionary.IntDictionary;
+import uk.co.real_logic.artio.dictionary.LongDictionary;
 import uk.co.real_logic.artio.fields.AsciiFieldFlyweight;
 import uk.co.real_logic.artio.util.MutableAsciiBuffer;
 
 import static org.mockito.Mockito.*;
 import static uk.co.real_logic.artio.ValidationError.*;
-import static uk.co.real_logic.artio.dictionary.StandardFixConstants.MESSAGE_TYPE;
+import static uk.co.real_logic.artio.dictionary.SessionConstants.MESSAGE_TYPE;
 
 public class OtfValidatorTest
 {
-    private OtfMessageAcceptor acceptor = mock(OtfMessageAcceptor.class);
+    private final OtfMessageAcceptor acceptor = mock(OtfMessageAcceptor.class);
 
-    private IntDictionary requiredFields = new IntDictionary();
-    private IntDictionary allFields = new IntDictionary();
-    private MutableAsciiBuffer buffer = new MutableAsciiBuffer(new byte[16 * 1024]);
+    private final LongDictionary requiredFields = new LongDictionary();
+    private final LongDictionary allFields = new LongDictionary();
+    private final MutableAsciiBuffer buffer = new MutableAsciiBuffer(new byte[16 * 1024]);
 
-    private OtfValidator validator = new OtfValidator(acceptor, allFields, requiredFields);
+    private final OtfValidator validator = new OtfValidator(acceptor, allFields, requiredFields);
 
     @Test
     public void validStartMessageDelegates()
@@ -173,17 +173,17 @@ public class OtfValidatorTest
 
     private void verifyUnknownMessage()
     {
-        verify(acceptor).onError(eq(UNKNOWN_MESSAGE_TYPE), eq((int)'0'), anyInt(), any(AsciiFieldFlyweight.class));
+        verify(acceptor).onError(eq(UNKNOWN_MESSAGE_TYPE), eq((long)'0'), anyInt(), any(AsciiFieldFlyweight.class));
     }
 
     private void verifyUnknownField()
     {
-        verify(acceptor).onError(eq(UNKNOWN_FIELD), eq((int)'0'), eq(112), any(AsciiFieldFlyweight.class));
+        verify(acceptor).onError(eq(UNKNOWN_FIELD), eq((long)'0'), eq(112), any(AsciiFieldFlyweight.class));
     }
 
     private void verifyMissingRequiredField()
     {
-        verify(acceptor).onError(eq(MISSING_REQUIRED_FIELD), eq((int)'0'), eq(112), any(AsciiFieldFlyweight.class));
+        verify(acceptor).onError(eq(MISSING_REQUIRED_FIELD), eq((long)'0'), eq(112), any(AsciiFieldFlyweight.class));
     }
 
     private void validateTestReqId()

@@ -2,8 +2,8 @@
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
                    package="uk.co.real_logic.artio.messages"
                    id="666"
-                   version="0"
-                   semanticVersion="0.1"
+                   version="10"
+                   semanticVersion="0.2"
                    description="Internal messaging format used by the FIX Gateway"
                    byteOrder="littleEndian">
     <types>
@@ -33,7 +33,8 @@
         <type name="ConnectionId" primitiveType="int64"/>
         <type name="CorrelationId" primitiveType="int64"/>
         <type name="TermId" primitiveType="int32"/>
-        <type name="MessageType" primitiveType="int32"/>
+        <type deprecated="3" name="DeprecatedMessageType" primitiveType="int32"/>
+        <type name="MessageType" primitiveType="int64"/>
         <type name="Timestamp" primitiveType="int64"/>
         <enum name="ConnectionType" encodingType="uint8">
             <validValue name="ACCEPTOR">0</validValue>
@@ -107,7 +108,9 @@
             <validValue name="INVALID_FIX_MESSAGE"
                         description="We disconnected due to codec validation failing">17</validValue>
             <validValue name="INVALID_CONFIGURATION_NOT_LOGGING_MESSAGES"
-                        description="Persistence Strategy specified INDEXED but EngineConfiguration has disabled required logging of messsages">18</validValue>
+                        description="Persistence Strategy specified INDEXED but EngineConfiguration has disabled required logging of messages">18</validValue>
+            <validValue name="AUTHENTICATION_TIMEOUT"
+                        description="We disconnected due to the authentication strategy not responding within the timeout">19</validValue>
         </enum>
         <enum name="SessionState" encodingType="uint8">
             <validValue name="CONNECTING"
@@ -171,6 +174,34 @@
             <validValue name="SESSION_HANDOVER">0</validValue>
             <validValue name="LIBRARY_NOTIFICATION">1</validValue>
         </enum>
+
+        <enum name="MetaDataStatus" encodingType="uint8" sinceVersion="5">
+            <validValue name="OK">0</validValue>
+            <validValue name="UNKNOWN_SESSION">1</validValue>
+            <validValue name="FILE_ERROR">2</validValue>
+            <validValue name="NO_META_DATA">4</validValue>
+            <validValue name="INVALID_OFFSET" sinceVersion="7">5</validValue>
+        </enum>
+
+        <enum name="ReplayMessagesStatus" encodingType="uint8">
+            <validValue name="OK"
+                        description="Operation Succeeded">0</validValue>
+            <validValue name="SESSION_NOT_OWNED"
+                        description="Either your library doesn't own this session or the gateway doesn't know about the specified session">1</validValue>
+            <validValue name="UNKNOWN_LIBRARY"
+                        description="The gateway doesn't know about your library">2</validValue>
+            <validValue name="SEQUENCE_NUMBER_TOO_HIGH"
+                        description="Can't replay to that sequence number: haven't archived it yet">4</validValue>
+            <validValue name="MISSING_MESSAGES"
+                        description="We can't find the required number of messages in the log">5</validValue>
+            <validValue name="INVALID_CONFIGURATION_NOT_LOGGING_MESSAGES"
+                        description="You've requested replay of messages, but EngineConfiguration has disabled required logging of messsages">6</validValue>
+        </enum>
+
+        <enum name="InitialAcceptedSessionOwner" encodingType="uint8" sinceVersion="10">
+            <validValue name="ENGINE">0</validValue>
+            <validValue name="SOLE_LIBRARY">1</validValue>
+        </enum>
     </types>
 
     <!-- Messages From Library To Engine -->
@@ -196,6 +227,7 @@
         <data name="targetLocationId" id="14" type="Utf8String"/>
         <data name="username" id="15" type="Utf8String"/>
         <data name="password" id="16" type="Utf8String"/>
+        <data name="fixDictionary" id="22" type="Utf8String"/>
     </sbe:message>
 
     <sbe:message name="RequestDisconnect" id="12" description="Request a connection be disconnected">
@@ -236,6 +268,57 @@
         <field name="sequenceIndex" id="5" type="SequenceIndex" />
     </sbe:message>
 
+    <sbe:message name="MidConnectionDisconnect" id="46"
+                 description="disconnect, even though you haven't finished connecting">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="correlationId" id="2" type="CorrelationId"/>
+    </sbe:message>
+
+    <sbe:message name="FollowerSessionRequest" id="47"
+                 description="">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="correlationId" id="2" type="CorrelationId"/>
+        <data name="header" id="3" type="AsciiString"/>
+    </sbe:message>
+
+    <sbe:message name="WriteMetaData" id="37" description="" sinceVersion="5">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="session" id="2" type="FixSessionId"/>
+        <field name="correlationId" id="3" type="CorrelationId"/>
+        <field name="metaDataOffset" id="5" type="int32"/>
+        <data name="metaData" id="4" type="Utf8String"/>
+    </sbe:message>
+
+    <sbe:message name="ReadMetaData" id="51" description="" sinceVersion="5">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="session" id="2" type="FixSessionId"/>
+        <field name="correlationId" id="3" type="CorrelationId"/>
+    </sbe:message>
+
+    <sbe:message name="ReplayMessages" id="53"
+                 description="" sinceVersion="7">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="session" id="2" type="FixSessionId"/>
+        <field name="correlationId" id="3" type="CorrelationId"/>
+        <field name="replayFromSequenceNumber" id="4" type="int32"/>
+        <field name="replayFromSequenceIndex" id="5" type="SequenceIndex"/>
+        <field name="replayToSequenceNumber" id="6" type="int32"/>
+        <field name="replayToSequenceIndex" id="7" type="SequenceIndex"/>
+        <field name="latestReplyArrivalTimeInMs" id="8" type="Timestamp" />
+    </sbe:message>
+
+    <sbe:message name="InitiateILinkConnection" id="56" description="Outbound ilink3 connection"
+        sinceVersion="8">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="port" id="2" type="int32"/>
+        <field name="correlationId" id="3" type="CorrelationId"/>
+        <field name="reestablishConnection" id="4" type="Bool"/>
+        <field name="useBackupHost" id="8" type="Bool"/>
+        <data name="host" id="5" type="Utf8String"/>
+        <data name="accessKeyId" id="6" type="Utf8String"/>
+        <data name="backupHost" id="7" type="Utf8String"/>
+    </sbe:message>
+
     <!-- Messages From Engine To Library -->
     <sbe:message name="Disconnect" id="7" description="A connection has disconnected">
         <field name="libraryId" id="1" type="LibraryId"/>
@@ -257,7 +340,6 @@
         <field name="session" id="3" type="FixSessionId"/>
         <field name="lastSentSequenceNumber" id="4" type="int32"/>
         <field name="lastReceivedSequenceNumber" id="5" type="int32"/>
-        <field name="logonTime" id="6" type="Timestamp" />
         <field name="sessionStatus" id="7" type="SessionStatus"/>
         <field name="slowStatus" id="8" type="SlowStatus"/>
         <field name="connectionType" id="9" type="ConnectionType"/>
@@ -265,11 +347,23 @@
         <field name="heartbeatIntervalInS" id="11" type="int32"/>
         <field name="replyToId" id="12" type="CorrelationId"/>
         <field name="sequenceIndex" id="13" type="SequenceIndex" />
-        <field name="awaitingResend" id="21" type="AwaitingResend" />
         <field name="closedResendInterval" id="22" type="Bool" />
         <field name="resendRequestChunkSize" id="23" type="int32" />
         <field name="sendRedundantResendRequests" id="24" type="Bool" />
         <field name="enableLastMsgSeqNumProcessed" id="25" type="Bool" />
+        <field name="logonReceivedSequenceNumber" id="33" type="int32" sinceVersion="4"/>
+        <field name="logonSequenceIndex" id="34" type="SequenceIndex" sinceVersion="4"/>
+        <field name="metaDataStatus" id="35" type="MetaDataStatus" sinceVersion="5"/>
+
+        <!-- State modified by the Session itself -->
+        <field name="awaitingResend" id="21" type="AwaitingResend" />
+        <field name="lastResentMsgSeqNo" id="28" type="int32" presence="optional" sinceVersion="1" />
+        <field name="lastResendChunkMsgSeqNum" id="29" type="int32" presence="optional" sinceVersion="1" />
+        <field name="endOfResendRequestRange" id="30" type="int32" presence="optional" sinceVersion="1" />
+        <field name="awaitingHeartbeat" id="31" type="Bool" presence="optional" sinceVersion="1" />
+        <field name="lastLogonTime" id="6" type="Timestamp" />
+        <field name="lastSequenceResetTime" id="37" type="Timestamp" presence="optional" sinceVersion="7"/>
+
         <data name="localCompId" id="14" type="Utf8String"/>
         <data name="localSubId" id="15" type="Utf8String"/>
         <data name="localLocationId" id="16" type="Utf8String"/>
@@ -279,6 +373,8 @@
         <data name="address" id="20" type="Utf8String"/>
         <data name="username" id="26" type="Utf8String"/>
         <data name="password" id="27" type="Utf8String"/>
+        <data name="fixDictionary" id="32" type="Utf8String"/>
+        <data name="metaData" id="36" type="Utf8String"/>
     </sbe:message>
 
     <sbe:message name="Error" id="13" description="An error has occurred">
@@ -302,17 +398,6 @@
         <field name="status" id="3" type="SessionReplyStatus"/>
     </sbe:message>
 
-    <sbe:message name="NewSentPosition" id="35" description="A notice of the owned position of the stream is">
-        <field name="libraryId" id="1" type="LibraryId"/>
-        <field name="position" id="2" type="int64"/>
-    </sbe:message>
-
-    <sbe:message name="NotLeader" id="37" description="Let a library know that you aren't the leader">
-        <field name="libraryId" id="1" type="LibraryId"/>
-        <field name="replyToId" id="2" type="CorrelationId"/>
-        <data name="libraryChannel" id="3" type="Utf8String"/>
-    </sbe:message>
-
     <sbe:message name="EngineDescriptor" id="38" description="">
         <data name="libraryChannel" id="1" type="Utf8String"/>
     </sbe:message>
@@ -320,6 +405,8 @@
     <sbe:message name="ControlNotification" id="39"
                  description="notifies library instances of messages that have been acquired">
         <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="initialAcceptedSessionOwner" id="3" type="InitialAcceptedSessionOwner"/>
+
         <group name="sessions" id="2" dimensionType="groupSizeEncoding">
             <field name="sessionId" id="10" type="FixSessionId"/>
         </group>
@@ -331,9 +418,61 @@
         <field name="connectCorrelationId" id="2" type="CorrelationId"/>
     </sbe:message>
 
+    <sbe:message name="FollowerSessionReply" id="48"
+                 description="">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="replyToId" id="2" type="CorrelationId"/>
+        <field name="session" id="3" type="FixSessionId"/>
+    </sbe:message>
+
+    <sbe:message name="EndOfDay" id="49" description="A connection has disconnected" sinceVersion="2">
+        <field name="libraryId" id="1" type="LibraryId"/>
+    </sbe:message>
+
+    <sbe:message name="WriteMetaDataReply" id="50" description="" sinceVersion="5">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="replyToId" id="2" type="CorrelationId"/>
+        <field name="status" id="3" type="MetaDataStatus"/>
+    </sbe:message>
+
+    <sbe:message name="ReadMetaDataReply" id="52" description="" sinceVersion="5">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="replyToId" id="2" type="CorrelationId"/>
+        <field name="status" id="3" type="MetaDataStatus"/>
+        <data name="metaData" id="4" type="Utf8String"/>
+    </sbe:message>
+
+    <sbe:message name="ReplayMessagesReply" id="54" description="response to ReplayMessages" sinceVersion="7">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="replyToId" id="2" type="CorrelationId"/>
+        <field name="status" id="3" type="ReplayMessagesStatus"/>
+    </sbe:message>
+
+    <sbe:message name="ILinkConnect" id="57" description="ILink TCP Connection established"
+                 sinceVersion="8">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="correlationId" id="2" type="CorrelationId"/>
+        <field name="connection" id="3" type="ConnectionId"/>
+        <field name="uuid" id="4" type="uint64"/>
+        <field name="lastReceivedSequenceNumber" id="5" type="int64"/>
+        <field name="lastSentSequenceNumber" id="6" type="int64"/>
+        <field name="newlyAllocated" id="7" type="Bool"/>
+        <field name="lastUuid" id="8" type="uint64"/>
+    </sbe:message>
+
+    <sbe:message name="LibraryExtendPosition" id="60" description="" sinceVersion="9">
+        <field name="libraryId" id="1" type="LibraryId"/>
+        <field name="correlationId" id="2" type="CorrelationId"/>
+        <field name="sessionId" id="3" type="int32"/>
+        <field name="stopPosition" id="4" type="int64"/>
+        <field name="initialTermId" id="5" type="int32"/>
+        <field name="termBufferLength" id="6" type="int32"/>
+        <field name="mtuLength" id="7" type="int32"/>
+    </sbe:message>
+
     <!-- Messages In Either Direction -->
     <sbe:message name="FixMessage" id="1" description="A framed FIX message">
-        <field name="messageType" id="1" type="MessageType"/>
+        <field deprecated="3" name="deprecatedMessageType" id="1" type="DeprecatedMessageType"/>
         <field name="session" id="2" type="FixSessionId"/>
         <field name="connection" id="3" type="ConnectionId"/>
         <field name="timestamp" id="4" type="Timestamp"/>
@@ -341,8 +480,11 @@
         <field name="libraryId" id="6" type="LibraryId"/>
         <field name="bytesSent" id="7" type="int32" />
         <field name="sequenceIndex" id="8" type="SequenceIndex" />
+        <field name="metaDataUpdateOffset" id="13" type="int32" />
         <!-- only visible outbound -->
         <field name="sequenceNumber" id="9" type="int32" />
+        <field name="messageType" id="11" type="MessageType" presence="optional" sinceVersion="3"/>
+        <data name="metaData" id="12" type="Utf8String"  sinceVersion="6"/>
         <data name="body" id="10" type="AsciiString"/>
     </sbe:message>
 
@@ -373,6 +515,30 @@
     <sbe:message name="ReplayComplete" id="45"
                  description="Replayer tells SenderEndPoint that the current replay is complete">
         <field name="connection" id="1" type="ConnectionId"/>
+        <field name="libraryId" id="2" type="LibraryId" sinceVersion="9"/>
+    </sbe:message>
+
+    <sbe:message name="ILinkMessage" id="58" description="ILink3 Message Header"
+                 sinceVersion="8">
+        <field name="connection" id="1" type="ConnectionId"/>
+    </sbe:message>
+
+    <!-- Messages From either Library or Engine outbound -->
+    <sbe:message name="RedactSequenceUpdate" id="55"
+                 description="" sinceVersion="7">
+        <field name="session" id="1" type="FixSessionId"/>
+        <field name="correctSequenceNumber" id="2" type="int32"/>
+        <field name="position" id="3" type="int64"/>
+    </sbe:message>
+
+    <sbe:message name="ValidResendRequest" id="59" description="Notifies the replayer to resend messages"
+        sinceVersion="9">
+        <field name="session" id="1" type="FixSessionId"/>
+        <field name="connection" id="2" type="ConnectionId"/>
+        <field name="beginSequenceNumber" id="3" type="uint32"/>
+        <field name="endSequenceNumber" id="4" type="uint32"/>
+        <field name="SequenceIndex" id="5" type="int32"/>
+        <data name="body" id="6" type="AsciiString"/>
     </sbe:message>
 
 </sbe:messageSchema>

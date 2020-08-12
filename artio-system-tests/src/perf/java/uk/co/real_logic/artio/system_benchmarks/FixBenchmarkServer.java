@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -18,7 +18,6 @@ package uk.co.real_logic.artio.system_benchmarks;
 import io.aeron.driver.MediaDriver;
 import org.agrona.IoUtil;
 import org.agrona.concurrent.IdleStrategy;
-import uk.co.real_logic.artio.CommonConfiguration;
 import uk.co.real_logic.artio.engine.EngineConfiguration;
 import uk.co.real_logic.artio.engine.FixEngine;
 import uk.co.real_logic.artio.library.AcquiringSessionExistsHandler;
@@ -82,7 +81,7 @@ public final class FixBenchmarkServer
 
         final EngineConfiguration configuration = new EngineConfiguration();
         configuration.printAeronStreamIdentifiers(true);
-        setupAuthentication(configuration);
+        configuration.authenticationStrategy((logon) -> !REJECT_LOGON);
 
         return configuration
             .bindTo("localhost", BenchmarkConfiguration.PORT)
@@ -97,16 +96,11 @@ public final class FixBenchmarkServer
     {
         final LibraryConfiguration configuration = new LibraryConfiguration();
         configuration.printAeronStreamIdentifiers(true);
-        setupAuthentication(configuration);
 
         return configuration
             .libraryAeronChannels(singletonList(AERON_CHANNEL))
-            .sessionAcquireHandler((session, isSlow) -> new BenchmarkSessionHandler())
+            .sessionAcquireHandler((session, acquiredInfo) -> new BenchmarkSessionHandler())
             .sessionExistsHandler(new AcquiringSessionExistsHandler(true));
     }
 
-    private static void setupAuthentication(final CommonConfiguration configuration)
-    {
-        configuration.authenticationStrategy((logon) -> !REJECT_LOGON);
-    }
 }

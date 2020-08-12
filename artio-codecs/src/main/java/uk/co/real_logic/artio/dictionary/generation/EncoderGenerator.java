@@ -1,11 +1,11 @@
 /*
- * Copyright 2015-2017 Real Logic Ltd.
+ * Copyright 2015-2020 Real Logic Limited., Monotonic Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
  *
- * http://www.apache.org/licenses/LICENSE-2.0
+ * https://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -15,41 +15,50 @@
  */
 package uk.co.real_logic.artio.dictionary.generation;
 
+import org.agrona.AsciiSequenceView;
+import org.agrona.DirectBuffer;
+import org.agrona.MutableDirectBuffer;
+import org.agrona.concurrent.UnsafeBuffer;
+import org.agrona.generation.OutputManager;
+import uk.co.real_logic.artio.builder.Encoder;
+import uk.co.real_logic.artio.builder.SessionHeaderEncoder;
+import uk.co.real_logic.artio.dictionary.ir.*;
+import uk.co.real_logic.artio.dictionary.ir.Entry.Element;
+import uk.co.real_logic.artio.dictionary.ir.Field.Type;
+import uk.co.real_logic.artio.util.MutableAsciiBuffer;
+
 import java.io.IOException;
 import java.io.Writer;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.IntStream;
 
-import org.agrona.generation.OutputManager;
-
-
-import uk.co.real_logic.artio.builder.Encoder;
-import uk.co.real_logic.artio.builder.SessionHeaderEncoder;
-import uk.co.real_logic.artio.dictionary.ir.Aggregate;
-import uk.co.real_logic.artio.dictionary.ir.Component;
-import uk.co.real_logic.artio.dictionary.ir.Dictionary;
-import uk.co.real_logic.artio.dictionary.ir.Entry;
-import uk.co.real_logic.artio.dictionary.ir.Entry.Element;
-import uk.co.real_logic.artio.dictionary.ir.Field;
-import uk.co.real_logic.artio.dictionary.ir.Field.Type;
-import uk.co.real_logic.artio.dictionary.ir.Group;
-import uk.co.real_logic.artio.dictionary.ir.Message;
-import uk.co.real_logic.artio.util.MutableAsciiBuffer;
-
-import static java.util.Collections.emptyList;
-import static java.util.Collections.singletonList;
+import static java.util.Collections.*;
 import static java.util.stream.Collectors.joining;
 import static uk.co.real_logic.artio.dictionary.generation.AggregateType.GROUP;
 import static uk.co.real_logic.artio.dictionary.generation.AggregateType.HEADER;
 import static uk.co.real_logic.artio.dictionary.generation.EnumGenerator.hasEnumGenerated;
 import static uk.co.real_logic.artio.dictionary.generation.GenerationUtil.fileHeader;
+import static uk.co.real_logic.artio.dictionary.generation.GenerationUtil.importFor;
+import static uk.co.real_logic.artio.dictionary.generation.OptionalSessionFields.ENCODER_OPTIONAL_SESSION_FIELDS;
 import static uk.co.real_logic.artio.util.MutableAsciiBuffer.LONGEST_INT_LENGTH;
 import static uk.co.real_logic.sbe.generation.java.JavaUtil.formatClassName;
 import static uk.co.real_logic.sbe.generation.java.JavaUtil.formatPropertyName;
 
 public class EncoderGenerator extends Generator
 {
+    private static final Set<String> REQUIRED_SESSION_CODECS = new HashSet<>(Arrays.asList(
+        "LogonEncoder",
+        "ResendRequestEncoder",
+        "LogoutEncoder",
+        "HeartbeatEncoder",
+        "RejectEncoder",
+        "TestRequestEncoder",
+        "SequenceResetEncoder"));
+
     private static final String SUFFIX =
         "        buffer.putSeparator(position);\n" +
         "        position++;\n" +
@@ -107,7 +116,7 @@ public class EncoderGenerator extends Generator
         "    }\n" +
         "\n" +
         "    // 35=...| + other header fields\n" +
-        "    long startMessage(final MutableAsciiBuffer buffer, final int offset)\n" +
+        "    public long startMessage(final MutableAsciiBuffer buffer, final int offset)\n" +
         "    {\n" +
         "        final int start = offset + beginStringLength + 16;\n" +
         "        int position = start;";
@@ -142,9 +151,7 @@ public class EncoderGenerator extends Generator
         "            next.reset();\n" +
         "        }\n";
 
-    public static final String METHOD_DELIMITER = "\n\n";
-
-    private static String encoderClassName(final String name)
+    static String encoderClassName(final String name)
     {
         return formatClassName(name + "Encoder");
     }
@@ -153,30 +160,26 @@ public class EncoderGenerator extends Generator
 
     private final MutableAsciiBuffer string = new MutableAsciiBuffer(buffer);
 
-    private final int initialArraySize;
-
     private final String beginString;  // e.g. "FIX.4.4"
 
     public EncoderGenerator(
         final Dictionary dictionary,
-        final int initialArraySize,
         final String builderPackage,
         final String builderCommonPackage,
         final OutputManager outputManager,
         final Class<?> validationClass,
-        final Class<?> rejectUnknownClass)
+        final Class<?> rejectUnknownFieldClass,
+        final Class<?> rejectUnknownEnumValueClass,
+        final String codecRejectUnknownEnumValueEnabled)
     {
-        super(dictionary, builderPackage, builderCommonPackage, outputManager, validationClass, rejectUnknownClass);
+        super(dictionary, builderPackage, builderCommonPackage, outputManager, validationClass, rejectUnknownFieldClass,
+            rejectUnknownEnumValueClass, false, codecRejectUnknownEnumValueEnabled);
 
         final Component header = dictionary.header();
         validateHasField(header, BEGIN_STRING);
         validateHasField(header, BODY_LENGTH);
 
-        this.initialArraySize = initialArraySize;
-        beginString = String.format("%s.%d.%d",
-                                    dictionary.specType(),
-                                    dictionary.majorVersion(),
-                                    dictionary.minorVersion());
+        beginString = dictionary.beginString();
     }
 
     private void validateHasField(final Component header, final String fieldName)
@@ -195,8 +198,21 @@ public class EncoderGenerator extends Generator
             className,
             (out) ->
             {
-                out.append(fileHeader(builderPackage));
-                generateImports("Encoder", aggregateType, out);
+                out.append(fileHeader(thisPackage));
+
+                if (REQUIRED_SESSION_CODECS.contains(className))
+                {
+                    out.append(importFor("uk.co.real_logic.artio.builder.Abstract" + className));
+                }
+
+                generateImports(
+                    "Encoder",
+                    aggregateType,
+                    out,
+                    DirectBuffer.class,
+                    MutableDirectBuffer.class,
+                    UnsafeBuffer.class,
+                    AsciiSequenceView.class);
                 generateAggregateClass(aggregate, aggregateType, className, out);
             });
     }
@@ -206,7 +222,6 @@ public class EncoderGenerator extends Generator
         return Encoder.class;
     }
 
-    @Override
     protected String resetGroup(final Entry entry)
     {
         final Group group = (Group)entry.element();
@@ -239,7 +254,11 @@ public class EncoderGenerator extends Generator
         final List<String> interfaces;
         if (isMessage)
         {
-            interfaces = singletonList(Encoder.class.getSimpleName());
+            final String parentName =
+                (REQUIRED_SESSION_CODECS.contains(className)) ?
+                "Abstract" + className :
+                Encoder.class.getSimpleName();
+            interfaces = singletonList(parentName);
         }
         else if (isHeader)
         {
@@ -267,14 +286,13 @@ public class EncoderGenerator extends Generator
                 "    private static final byte[] DEFAULT_BEGIN_STRING=\"%s\".getBytes(StandardCharsets.US_ASCII);" +
                 "\n\n",
                 beginString));
-
         }
 
         precomputedHeaders(out, aggregate.entries());
-        setters(out, className, aggregate.entries());
+        generateSetters(out, className, aggregate.entries());
         out.append(encodeMethod(aggregate.entries(), type));
         out.append(completeResetMethod(aggregate, isMessage, type));
-        out.append(toString(aggregate, isMessage));
+        out.append(generateAppendTo(aggregate, isMessage));
         out.append("}\n");
     }
 
@@ -324,15 +342,15 @@ public class EncoderGenerator extends Generator
         {
             final Component header = dictionary.header();
             final Message message = (Message)aggregate;
-            final int packedType = message.packedType();
+            final long packedType = message.packedType();
             final String fullType = message.fullType();
             final String msgType = header.hasField(MSG_TYPE) ?
                 String.format("        header.msgType(\"%s\");\n", fullType) : "";
 
             return String.format(
-                "    public int messageType()\n" +
+                "    public long messageType()\n" +
                 "    {\n" +
-                "        return %s;\n" +
+                "        return %sL;\n" +
                 "    }\n\n" +
                 "    public %sEncoder()\n" +
                 "    {\n" +
@@ -355,29 +373,125 @@ public class EncoderGenerator extends Generator
         {
             return "";
         }
-
     }
 
-    private void setters(final Writer out, final String className, final List<Entry> entries) throws IOException
+    private void generateSetters(final Writer out, final String className, final List<Entry> entries)
+        throws IOException
     {
+        final List<String> optionalFields = ENCODER_OPTIONAL_SESSION_FIELDS.get(className);
+        final Set<String> missingOptionalFields = (optionalFields == null) ? emptySet() : new HashSet<>(optionalFields);
+
         for (final Entry entry : entries)
         {
-            setter(className, entry, out);
+            generateSetter(className, entry, out, missingOptionalFields);
+        }
+
+        generateMissingOptionalSessionFields(out, className, missingOptionalFields);
+        generateOptionalSessionFieldsSupportedMethods(optionalFields, missingOptionalFields, out);
+    }
+
+    private void generateMissingOptionalSessionFields(
+        final Writer out, final String className, final Set<String> missingOptionalFields)
+        throws IOException
+    {
+        for (final String optionalField : missingOptionalFields)
+        {
+            final String propertyName = formatPropertyName(optionalField);
+
+            out.append(String.format(
+                "    public %2$s %1$s(final DirectBuffer value, final int offset, final int length)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final DirectBuffer value, final int length)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final DirectBuffer value)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final byte[] value, final int offset, final int length)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final byte[] value, final int length)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final byte[] value)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public boolean has%3$s()\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public String %1$sAsString()\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final CharSequence value)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final AsciiSequenceView value)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final char[] value, final int offset, final int length)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final char[] value, final int length)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public %2$s %1$s(final char[] value)\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public MutableDirectBuffer %1$s()\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }\n" +
+                "\n" +
+                "    public void reset%3$s()\n" +
+                "    {\n" +
+                "        throw new UnsupportedOperationException();\n" +
+                "    }",
+                propertyName,
+                className,
+                optionalField));
         }
     }
 
-    private void setter(final String className, final Entry entry, final Writer out) throws IOException
+    private void generateSetter(
+        final String className, final Entry entry, final Writer out, final Set<String> optionalFields)
     {
         if (!isBodyLength(entry))
         {
             entry.forEach(
-                (field) -> out.append(fieldSetter(className, field)),
-                (group) -> generateGroup(className, group, out),
-                (component) -> componentField(encoderClassName(entry.name()), component, out));
+                (field) -> out.append(generateFieldSetter(className, field, optionalFields)),
+                (group) -> generateGroup(className, group, out, optionalFields),
+                (component) -> generateComponentField(encoderClassName(entry.name()), component, out));
         }
     }
 
-    private String fieldSetter(final String className, final Field field)
+    private String generateFieldSetter(final String className, final Field field, final Set<String> optionalFields)
     {
         final String name = field.name();
         final String fieldName = formatPropertyName(name);
@@ -390,7 +504,9 @@ public class EncoderGenerator extends Generator
             enumSetter(className, fieldName, field.name()) : "";
 
         final Function<String, String> generateSetter =
-            (type) -> setter(name, type, fieldName, hasField, className, hasAssign, enumSetter);
+            (type) -> generateSetter(name, type, fieldName, hasField, className, hasAssign, enumSetter);
+
+        optionalFields.remove(name);
 
         switch (field.type())
         {
@@ -436,18 +552,20 @@ public class EncoderGenerator extends Generator
             case MONTHYEAR:
             case TZTIMEONLY:
             case TZTIMESTAMP:
-                return generateByteArraySetter(className, fieldName, name);
+                return generateBytesSetter(className, fieldName, name);
 
             default: throw new UnsupportedOperationException("Unknown type: " + field.type());
         }
     }
 
-    private void generateGroup(final String className, final Group group, final Writer out) throws IOException
+    private void generateGroup(
+        final String className, final Group group, final Writer out, final Set<String> optionalFields)
+        throws IOException
     {
         generateGroupClass(group, out);
 
         final Entry numberField = group.numberField();
-        setter(className, numberField, out);
+        generateSetter(className, numberField, out, optionalFields);
 
         out.append(String.format(
             "\n" +
@@ -468,41 +586,56 @@ public class EncoderGenerator extends Generator
             formatPropertyName(numberField.name())));
     }
 
-    private String generateByteArraySetter(final String className, final String fieldName, final String name)
+    private String generateBytesSetter(final String className, final String fieldName, final String name)
     {
         return String.format(
-            "    private byte[] %1$s = new byte[%3$d];\n\n" +
+            "    private final MutableDirectBuffer %1$s = new UnsafeBuffer();\n\n" +
             "    private int %1$sOffset = 0;\n\n" +
             "    private int %1$sLength = 0;\n\n" +
-            "    public %2$s %1$s(final byte[] value, final int length)\n" +
+            "    public %2$s %1$s(final DirectBuffer value, final int offset, final int length)\n" +
             "    {\n" +
-            "        %1$s = value;\n" +
-            "        %1$sOffset = 0;\n" +
-            "        %1$sLength = length;\n" +
-            "        return this;\n" +
-            "    }\n\n" +
-            "    public %2$s %1$s(final byte[] value, final int offset, final int length)\n" +
-            "    {\n" +
-            "        %1$s = value;\n" +
+            "        %1$s.wrap(value);\n" +
             "        %1$sOffset = offset;\n" +
             "        %1$sLength = length;\n" +
             "        return this;\n" +
             "    }\n\n" +
+            "    public %2$s %1$s(final DirectBuffer value, final int length)\n" +
+            "    {\n" +
+            "        return %1$s(value, 0, length);\n" +
+            "    }\n\n" +
+            "    public %2$s %1$s(final DirectBuffer value)\n" +
+            "    {\n" +
+            "        return %1$s(value, 0, value.capacity());\n" +
+            "    }\n\n" +
+            "    public %2$s %1$s(final byte[] value, final int offset, final int length)\n" +
+            "    {\n" +
+            "        %1$s.wrap(value);\n" +
+            "        %1$sOffset = offset;\n" +
+            "        %1$sLength = length;\n" +
+            "        return this;\n" +
+            "    }\n\n" +
+            "    public %2$s %1$s(final byte[] value, final int length)\n" +
+            "    {\n" +
+            "        return %1$s(value, 0, length);\n" +
+            "    }\n\n" +
             "    public %2$s %1$s(final byte[] value)\n" +
             "    {\n" +
-            "        return %1$s(value, value.length);\n" +
+            "        return %1$s(value, 0, value.length);\n" +
             "    }\n\n" +
-            "    public boolean has%4$s()\n" +
+            "    public boolean has%3$s()\n" +
             "    {\n" +
             "        return %1$sLength > 0;\n" +
             "    }\n\n" +
-            "    public byte[] %1$s()\n" +
+            "    public MutableDirectBuffer %1$s()\n" +
             "    {\n" +
             "        return %1$s;\n" +
+            "    }\n\n" +
+            "    public String %1$sAsString()\n" +
+            "    {\n" +
+            "        return %1$s.getStringWithoutLengthAscii(%1$sOffset, %1$sLength);\n" +
             "    }\n\n",
             fieldName,
             className,
-            initialArraySize,
             name);
     }
 
@@ -516,37 +649,45 @@ public class EncoderGenerator extends Generator
             "%2$s" +
             "    public %3$s %1$s(final CharSequence value)\n" +
             "    {\n" +
-            "        %1$s = toBytes(value, %1$s);\n" +
+            "        toBytes(value, %1$s);\n" +
             "        %1$sOffset = 0;\n" +
             "        %1$sLength = value.length();\n" +
             "        return this;\n" +
             "    }\n\n" +
+            "    public %3$s %1$s(final AsciiSequenceView value)\n" +
+            "    {\n" +
+            "        final DirectBuffer buffer = value.buffer();\n" +
+            "        if (buffer != null)\n" +
+            "        {\n" +
+            "            %1$s.wrap(buffer);\n" +
+            "            %1$sOffset = value.offset();\n" +
+            "            %1$sLength = value.length();\n" +
+            "        }\n" +
+            "        return this;\n" +
+            "    }\n\n" +
             "    public %3$s %1$s(final char[] value)\n" +
             "    {\n" +
-            "        return %1$s(value, value.length);\n" +
+            "        return %1$s(value, 0, value.length);\n" +
             "    }\n\n" +
             "    public %3$s %1$s(final char[] value, final int length)\n" +
             "    {\n" +
-            "        %1$s = toBytes(value, %1$s, length);\n" +
-            "        %1$sOffset = 0;\n" +
-            "        %1$sLength = length;\n" +
-            "        return this;\n" +
+                "        return %1$s(value, 0, length);\n" +
             "    }\n\n" +
             "    public %3$s %1$s(final char[] value, final int offset, final int length)\n" +
             "    {\n" +
-            "        %1$s = toBytes(value, %1$s, offset, length);\n" +
+            "        toBytes(value, %1$s, offset, length);\n" +
             "        %1$sOffset = 0;\n" +
             "        %1$sLength = length;\n" +
             "        return this;\n" +
             "    }\n\n" +
             "%4$s",
             fieldName,
-            generateByteArraySetter(className, fieldName, name),
+            generateBytesSetter(className, fieldName, name),
             className,
             enumSetter);
     }
 
-    private String setter(
+    private String generateSetter(
         final String name,
         final String type,
         final String fieldName,
@@ -586,11 +727,11 @@ public class EncoderGenerator extends Generator
         final String enumSetter)
     {
         return String.format(
-            "    private DecimalFloat %1$s = new DecimalFloat();\n\n" +
+            "    private final DecimalFloat %1$s = new DecimalFloat();\n\n" +
             "%2$s" +
             "    public %3$s %1$s(DecimalFloat value)\n" +
             "    {\n" +
-            "        %1$s = value;\n" +
+            "        %1$s.set(value);\n" +
             "%4$s" +
             "        return this;\n" +
             "    }\n\n" +
@@ -618,8 +759,20 @@ public class EncoderGenerator extends Generator
         final String enumType)
     {
         return String.format(
-            "    public %s %2$s(%3$s value)\n" +
+            "    public %1$s %2$s(%3$s value)\n" +
             "    {\n" +
+            "        if (" + CODEC_VALIDATION_ENABLED + ")\n" +
+            "        {\n" +
+            "            if (value == %3$s.ARTIO_UNKNOWN)\n" +
+            "            {\n" +
+            "                throw new EncodingException(\"Invalid Value Field: " + fieldName +
+            " Value: \" + value );\n" +
+            "            }\n" +
+            "            if (value == %3$s.NULL_VAL)\n" +
+            "            {\n" +
+            "                return this;\n" +
+            "            }\n" +
+            "        }\n" +
             "        return %2$s(value.representation());\n" +
             "    }\n\n",
             className, fieldName, enumType
@@ -718,7 +871,7 @@ public class EncoderGenerator extends Generator
         final String fieldName = formatPropertyName(name);
         final Field.Type type = field.type();
         final boolean mustCheckFlag = hasFlag(entry, field);
-        final boolean mustCheckLength = type.hasLengthField();
+        final boolean mustCheckLength = type.hasLengthField(false);
         final boolean needsMissingThrow =
             (mustCheckFlag || mustCheckLength) && entry.required() && !"MsgSeqNum".equals(name);
 
@@ -786,7 +939,7 @@ public class EncoderGenerator extends Generator
             case UTCDATEONLY:
             case TZTIMEONLY:
             case TZTIMESTAMP:
-                return stringPut(fieldName, enablingSuffix, tag);
+                return encodeStringField(fieldName, enablingSuffix, tag);
 
             case DATA:
             case XMLDATA:
@@ -804,7 +957,7 @@ public class EncoderGenerator extends Generator
         }
     }
 
-    private String stringPut(final String fieldName, final String optionalSuffix, final String tag)
+    private String encodeStringField(final String fieldName, final String optionalSuffix, final String tag)
     {
         return formatEncoder(fieldName, optionalSuffix, tag,
         "        buffer.putBytes(position, %s, %2$sOffset, %2$sLength);\n" +
@@ -900,21 +1053,37 @@ public class EncoderGenerator extends Generator
             bytes));
     }
 
-    protected String stringToString(final String fieldName)
+    protected String stringAppendTo(final String fieldName)
     {
-        return String.format("new String(%s, %1$sOffset, %1$sLength, StandardCharsets.US_ASCII)", fieldName);
+        return String.format("appendBuffer(builder, %1$s, %1$sOffset, %1$sLength)", fieldName);
     }
 
-    protected String componentToString(final Component component)
+    protected String timeAppendTo(final String fieldName)
+    {
+        return stringAppendTo(fieldName);
+    }
+
+    protected String dataAppendTo(final Field field, final String fieldName)
+    {
+        final String lengthName = formatPropertyName(field.associatedLengthField().name());
+        return String.format("appendData(builder, %1$s, %2$s)", fieldName, lengthName);
+    }
+
+    protected String componentAppendTo(final Component component)
     {
         final String name = component.name();
         return String.format(
-            "                String.format(\"  \\\"%1$s\\\":  %%s\\n\", %2$s" + EXPAND_INDENT + ")",
+            "    indent(builder, level);\n" +
+            "    builder.append(\"\\\"%1$s\\\": \");\n" +
+            "    %2$s.appendTo(builder, level + 1);\n" +
+            "    builder.append(\"\\n\");\n",
             name,
             formatPropertyName(name));
     }
 
-    private void componentField(final String className, final Component element, final Writer out) throws IOException
+    private void generateComponentField(
+        final String className, final Component element, final Writer out)
+        throws IOException
     {
         out.append(String.format(
             "    private final %1$s %2$s = new %1$s();\n" +
@@ -936,24 +1105,11 @@ public class EncoderGenerator extends Generator
         return resetByFlag(field.name());
     }
 
-    protected String toStringGroupParameters()
-    {
-        return "final int remainingEntries";
-    }
-
-    protected String toStringGroupSuffix()
-    {
-        return
-            "        if (remainingEntries > 1)\n" +
-            "        {\n" +
-            "            entries += \",\\n\" + next.toString(remainingEntries - 1);\n" +
-            "        }\n";
-    }
-
     protected boolean hasFlag(final Entry entry, final Field field)
     {
         final Type type = field.type();
-        return (!entry.required() && !type.hasLengthField()) || type.isFloatBased() || type.isIntBased();
+        return (!entry.required() && !type.hasLengthField(false)) ||
+            type.isFloatBased() || type.isIntBased() || type.isCharBased();
     }
 
     protected String resetTemporalValue(final String name)
@@ -970,32 +1126,50 @@ public class EncoderGenerator extends Generator
             .collect(joining());
     }
 
-    @Override
     protected String resetStringBasedData(final String name)
     {
         return resetLength(name);
     }
 
-    protected String groupEntryToString(final Group element, final String name)
+    protected String groupEntryAppendTo(final Group group, final String name)
     {
-        final Entry numberField = element.numberField();
+        final Entry numberField = group.numberField();
+
         return String.format(
-            "                (%3$s > 0 ? String.format(\"  \\\"%1$s\\\": [\\n" +
-            "  %%s" +
-            "\\n  ]" +
-            "\\n\", %2$s.toString(%3$s).replace(\"\\n\", \"\\n  \")" + ") : \"\")",
+            "    if (has%2$s)\n" +
+            "    {\n" +
+            "    indent(builder, level);\n" +
+            "    builder.append(\"\\\"%1$s\\\": [\\n\");\n" +
+            "    final int %3$s = this.%3$s;\n" +
+            "    %5$s %4$s = this.%4$s;\n" +
+            "    for (int i = 0; i < %3$s; i++)\n" +
+            "    {\n" +
+            "        indent(builder, level);\n" +
+            "        %4$s.appendTo(builder, level + 1);" +
+            "        if (i < (%3$s - 1))\n" +
+            "        {\n" +
+            "            builder.append(',');\n" +
+            "        }\n" +
+            "        builder.append('\\n');\n" +
+            "        %4$s = %4$s.next();\n" +
+            "    }\n" +
+            "    indent(builder, level);\n" +
+            "    builder.append(\"],\\n\");\n" +
+            "    }\n",
             name,
+            group.numberField().name(),
+            formatPropertyName(numberField.name()),
             formatPropertyName(name),
-            formatPropertyName(numberField.name()));
+            encoderClassName(name));
     }
 
     protected String optionalReset(final Field field, final String name)
     {
-        return field.type().hasLengthField() ? resetLength(name) : resetByFlag(name);
+        return field.type().hasLengthField(false) ? resetLength(name) : resetByFlag(name);
     }
 
-    protected boolean toStringChecksHasGetter(final Entry entry, final Field field)
+    protected boolean appendToChecksHasGetter(final Entry entry, final Field field)
     {
-        return hasFlag(entry, field) || field.type().hasLengthField();
+        return hasFlag(entry, field) || field.type().hasLengthField(false);
     }
 }
